@@ -308,8 +308,7 @@ class takei(Stream):
         self.indexiter = iter(indices)
 
     def __call__(self, iterator):
-        def itaker():
-          try:
+        try:
             old_idx = -1
             idx = next(self.indexiter)                # next value to yield
             counter = seq()
@@ -322,9 +321,8 @@ class takei(Stream):
                     yield elem
                     old_idx = idx
                     idx = next(self.indexiter)
-          except StopIteration:
-              pass
-        return itaker()
+        except StopIteration:
+            pass
 
 
 class drop(Stream):
@@ -348,6 +346,8 @@ class dropi(Stream):
 
     >>> seq() >> dropi(seq(0,3)) >> item[:10]
     [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
+    >>> "abcd" >> dropi(range(1,3)) >> reduce(lambda a,b: a+b)
+    'ad'
     """
     def __init__(self, indices):
         """indices: an iterable of indices to be dropped, should yield
@@ -357,28 +357,27 @@ class dropi(Stream):
         self.indexiter = iter(indices)
 
     def __call__(self, iterator):
-        def idropper():
-            counter = seq()
-            def try_next_idx():
-                ## so that the stream keeps going 
-                ## after the discard iterator is exhausted
-                try:
-                    return next(self.indexiter), False
-                except StopIteration:        
-                    return -1, True
-            old_idx = -1
-            idx, exhausted = try_next_idx()                  # next value to discard
-            while 1:
-                c = next(counter)
-                elem = next(iterator)
-                while not exhausted and idx <= old_idx:    # ignore bad values
-                    idx, exhausted = try_next_idx()    
-                if c != idx:
-                    yield elem
-                elif not exhausted:
-                    old_idx = idx
-                    idx, exhausted = try_next_idx()
-        return idropper()
+        counter = seq()
+        def try_next_idx():
+            ## so that the stream keeps going
+            ## after the discard iterator is exhausted
+            try:
+                return next(self.indexiter), False
+            except StopIteration:
+                return -1, True
+        old_idx = -1
+        idx, exhausted = try_next_idx()                  # next value to discard
+        while not exhausted:
+            c = next(counter)
+            elem = next(iterator)
+            while not exhausted and idx <= old_idx:    # ignore bad values
+                idx, exhausted = try_next_idx()
+            if c != idx:
+                yield elem
+            elif not exhausted:
+                old_idx = idx
+                idx, exhausted = try_next_idx()
+        yield from iterator
 
 
 #_______________________________________________________________________
@@ -506,16 +505,14 @@ class fold(Stream):
         self.initval = initval
 
     def __call__(self, iterator):
-        def folder():
-            if self.initval:
-                accumulated = self.initval
-            else:
-                accumulated = next(iterator)
-            while 1:
-                yield accumulated
-                val = next(iterator)
-                accumulated = self.function(accumulated, val)
-        return folder()
+        if self.initval:
+            accumulated = self.initval
+        else:
+            accumulated = next(iterator)
+        yield accumulated
+        for val in iterator:
+            accumulated = self.function(accumulated, val)
+            yield accumulated
 
 
 #_____________________________________________________________________
@@ -534,14 +531,12 @@ class chop(Stream):
         self.n = n
 
     def __call__(self, iterator):
-        def chopper():
-            while 1:
-                s = iterator >> item[:self.n]
-                if s:
-                    yield s
-                else:
-                    break
-        return chopper()
+        while 1:
+            s = iterator >> item[:self.n]
+            if s:
+                yield s
+            else:
+                break
 
 
 class itemcutter(map):
@@ -572,24 +567,22 @@ class flattener(Stream):
     """
     @staticmethod
     def __call__(iterator):
-        def flatten():
-            ## Maintain a LIFO stack of iterators
-            stack = []
-            i = iterator
-            while True:
+        ## Maintain a LIFO stack of iterators
+        stack = []
+        i = iterator
+        while True:
+            try:
+                e = next(i)
+                if hasattr(e, "__iter__") and not isinstance(e, str):
+                    stack.append(i)
+                    i = iter(e)
+                else:
+                    yield e
+            except StopIteration:
                 try:
-                    e = next(i)
-                    if hasattr(e, "__iter__") and not isinstance(e, str):
-                        stack.append(i)
-                        i = iter(e)
-                    else:
-                        yield e
-                except StopIteration:
-                    try:
-                        i = stack.pop()
-                    except IndexError:
-                        break
-        return flatten()
+                    i = stack.pop()
+                except IndexError:
+                    break
 
     def __repr__(self):
         return '<flattener at %s>' % hex(id(self))
@@ -804,7 +797,7 @@ class ThreadPool(Stream):
     
     def __call__(self, inpipe):
         if self.closed:
-            raise BrokenPipe('All workers are dead, refusing to summit jobs. '
+            raise BrokenPipe('All workers are dead, refusing to submit jobs. '
                              'Use another Pool.')
         def feed():
             for item in inpipe:

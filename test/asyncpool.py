@@ -16,23 +16,24 @@ from stream import filter, map, ThreadPool, ProcessPool
 dataset = []
 
 def alternating(n):
-	values = []
-	for i in range(1, n+1):
-		values.append(i)
-		values.append(-i)
-	return values
+    values = []
+    for i in range(1, n+1):
+        values.append(i)
+        values.append(-i)
+    return values
 
 def randomized(n):
-	values = []
-	for _ in range(n):
-		values.append(randint(-sys.maxint, sys.maxint))
-	return values
+    maxint = (1<<64)-1
+    values = []
+    for _ in range(n):
+        values.append(randint(-maxint, maxint))
+    return values
 
 for v in [10, 100, 1000] >> map(alternating):
-	dataset.append(v)
+    dataset.append(v)
 
 for v in [10, 100, 1000] >> map(randomized):
-	dataset.append(v)
+    dataset.append(v)
 
 func = filter(lambda x: x&1)
 
@@ -42,27 +43,27 @@ resultset = dataset >> map(lambda s: s >> func >> set) >> list
 ## Test scenario
 
 def threadpool(i):
-	result = dataset[i] >> ThreadPool(func, poolsize=2) >> set
-	pprint(result)
-	assert result == resultset[i]
+    result = dataset[i] >> ThreadPool(func, poolsize=2) >> set
+    pprint(result)
+    assert result == resultset[i]
 
 def processpool(i):
-	result = dataset[i] >> ProcessPool(func, poolsize=2) >> set
-	pprint(result)
-	assert result == resultset[i]
+    result = dataset[i] >> ProcessPool(func, poolsize=2) >> set
+    pprint(result)
+    assert result == resultset[i]
 
 
 ## Test cases
 
 def test_ThreadPool():
-	for i in range(len(dataset)):
-		yield threadpool, i
+    for i in range(len(dataset)):
+        threadpool(i)
 
 def test_ProcessPool():
-	for i in range(len(dataset)):
-		yield processpool, i
+    for i in range(len(dataset)):
+        processpool(i)
 
 
 if __name__ == '__main__':
-	import nose
-	nose.main()
+    import nose
+    nose.main()

@@ -26,11 +26,11 @@ def submit(poolclass, n):
 
 def test_ThreadPool_submit():
 	for n in result.keys():
-		yield submit, ThreadPool, n
+		submit(ThreadPool, n)
 
 def test_ProcessPool_submit():
 	for n in result.keys():
-		yield submit, ProcessPool, n
+		submit(ProcessPool, n)
 
 
 ## Test concurrent submission and cancellation
@@ -46,16 +46,16 @@ def cancel(poolclass, n):
 	t2.join()
 	e.close()
 	completed = len(e.result >> list)
-	print completed, cancelled
+	print(completed, cancelled)
 	assert completed + cancelled == n
 
 def test_ThreadPool_cancel():
 	for n in result.keys():
-		yield cancel, ThreadPool, n
+		cancel(ThreadPool, n)
 
 def test_ProcessPool_cancel():
 	for n in result.keys():
-		yield cancel, ProcessPool, n
+		cancel(ProcessPool, n)
 
 
 ## Test shutdown
@@ -64,18 +64,18 @@ def shutdown(poolclass, n):
 	e = Executor(poolclass, map(lambda x: x*x), poolsize=2)
 	e.submit(*range(n))
 	e.shutdown()
-	print e.result >> list
+	print(e.result >> list)
 	assert e.inputfeeder_thread.is_alive() == False
 	assert e.resulttracker_thread.is_alive() == False
 	assert e.failuretracker_thread.is_alive() == False
 
 def test_ThreadPool_shutdown():
 	for n in result.keys():
-		yield shutdown, ThreadPool, n
+		shutdown(ThreadPool, n)
 
 def test_ProcessPool_shutdown():
 	for n in result.keys():
-		yield shutdown, ProcessPool, n
+		shutdown(ProcessPool, n)
 
 
 if __name__ == "__main__":

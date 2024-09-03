@@ -1,4 +1,4 @@
-#!/usr/bin/env python2.6
+#!/usr/bin/env python
 
 import os, sys
 
@@ -14,7 +14,8 @@ from stream import ForkedFeeder, ThreadedFeeder, PCollector, QCollector
 N = 1000
 
 def producer():
-	for x in xrange(N):
+    # TODO: throw an error here to test how robust the collector is
+	for x in range(N):
 		yield x
 
 def collect(feeder_class, collector_class, n):
@@ -24,18 +25,18 @@ def collect(feeder_class, collector_class, n):
 	results = consumer >> list
 	pprint(results)
 	assert len(results) == N * n
-	assert set(results) == set(xrange(N))
+	assert set(results) == set(range(N))
 
 
 ## Test cases
 
 def test_PCollector():
 	for i in [1, 2, 3, 4]:
-		yield collect, ForkedFeeder, PCollector, i
+		collect( ForkedFeeder, PCollector, i )
 
 def test_QCollector():
 	for i in [1, 2, 3, 4]:
-		yield collect, ThreadedFeeder, QCollector, i
+		collect( ThreadedFeeder, QCollector, i )
 
 
 if __name__ == '__main__':

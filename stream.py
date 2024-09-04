@@ -6,6 +6,41 @@ Overview
 Streams are iterables with a pipelining mechanism to enable
 data-flow programming and easy parallelization.
 
+The idea is to create a `Stream` class with 4 states: 
+ - "pure" (no source or sink connected) 
+ - "consumer" (sink but no source) 
+ - "live" (source but no sink) 
+ - "final" (source and sink connected) 
+
+Both "pure" and "consumer" Stream-s maintain no internal
+state.  They can be re-used with multiple input streams
+to make different results.
+
+Sources can be any iterable.  Sinks can be any callable.
+When a source is connected to a sink, it becomes "final".
+The sink (or its `__call__` method) will be called, with
+the source as its argument.
+The sink should iterate over the source
+-- advancing the state of the source.
+The "final" result evaluates to the return value of the sink.
+
+Data sources can be created with `Source(iterable)`
+pure transformers can be created with `Stream(generator, *args, **kws)`,
+(where generator does not have an `__iter__` method),
+and sinks are any callable taking a stream as an argument.
+If you want to repeatedly call `callable(x, *args, **kws)` for each
+element in the stream, there is a helper, `SinkFn(callable, *args, **kws)`.
+
+If the sink does not completely consume
+the source, then the source can be connected to further
+sinks to yield the remaining values from the stream.
+
+Sources and sinks can be distinguished by whether they contain
+`__iter__` or `__call__` methods.  Only "live" sources define
+`__iter__`.  All Streams and Sinks define `__call__`.  However, calling
+a "pure" stream returns another Stream, whereas calling
+a "sink" consumes the input and returns the result.
+
 The idea is to take the output of a function that turn an iterable into
 another iterable and plug that as the input of another such function.
 While you can already do this using function composition, this package
@@ -29,6 +64,7 @@ Filters:
 
 Accumulators:  item, maximum, minimum, reduce
     + from Python:  list, sum, dict, max, min ...
+    (anything you can call with an iterable)
 
 Values are computed only when an accumulator forces some or all evaluation
 (not when the stream are set up).
@@ -68,7 +104,22 @@ Articles
 
 Articles written about this module by the author can be retrieved from
 <http://blog.onideas.ws/tag/project:stream.py>.
+
+* [SICP](https://mitp-content-server.mit.edu/books/content/sectbyfn/books_pres_0/6515/sicp.zip/index.html)
+* [pointfree](https://github.com/mshroyer/pointfree)
+* [Generator Tricks for Systems Programmers](http://www.dabeaz.com/generators/Generators.pdf)
 """
+
+import pkg_resources
+try:
+    __version__ = pkg_resources.get_distribution('stream').version
+except Exception:
+    __version__ = 'unknown'
+
+from typing import Optional, Callable, Iterable, Iterator, TypeVar, Generic, List
+# Note: Iterable has __iter__,
+# while Iterator has __next__ (and also __iter__ ~ self)
+# so iter : Iterable[T] -> Iterator[T]
 
 import copy
 import collections
@@ -88,11 +139,7 @@ from operator import itemgetter, attrgetter
 _filter = filter
 _map = map
 _reduce = functools.reduce
-
-try:
-    zip = itertools.izip
-except AttributeError:
-    pass
+_zip = zip
 
 try:
     import multiprocessing
@@ -100,30 +147,7 @@ try:
 except ImportError:
     _nCPU = 1
 
-try:
-    Iterable = collections.Iterable
-except AttributeError:
-    Iterable = object
-
-try:
-    next
-except NameError:
-    def next(iterator):
-        return iterator.next()
-
-try:
-    from operator import methodcaller
-except ImportError:
-    def methodcaller(methodname, *args, **kwargs):
-        return lambda o: getattr(o, methodname)(*args, **kwargs)
-
-
-import pkg_resources
-
-try:
-    __version__ = pkg_resources.get_distribution('stream').version
-except Exception:
-    __version__ = 'unknown'
+from operator import methodcaller
 
 
 #_____________________________________________________________________
@@ -133,59 +157,39 @@ except Exception:
 class BrokenPipe(Exception):
     pass
 
+S = TypeVar('S')
+R = TypeVar('R')
+class BaseStream:
+    """The operator >> is a synonym for BaseStream.pipe.
 
-class Stream(Iterable):
-    """A stream is both a lazy list and an iterator-processing function.
-
-    The lazy list is represented by the attribute 'iterator'.
+    The expression `a >> b` means
+      - `b(iter(a)) if hasattr(a, '__iter__')`
+      - `Stream(lambda it: b(a(it))) if isinstance(b, Stream)`
+      - `Sink(lambda it: b(a(it)))` otherwise
     
-    The iterator-processing function is represented by the method
-    __call__(iterator), which should return a new iterator
-    representing the output of the Stream.
-    
-    By default, __call__(iterator) chains iterator with self.iterator,
-    appending itself to the input stream in effect.
-    
-    __pipe__(inpipe) defines the connection mechanism between Stream objects.
-    By default, it replaces self.iterator with the iterator returned by
-    __call__(iter(inpipe)).
-    
-    A Stream subclass will usually implement __call__, unless it is an
-    accumulator and will not return a Stream, in which case it will need to
-    implement __pipe__.
-    
-    The `>>` operator works as follow: the expression `a >> b` means
-    `b.__pipe__(a) if hasattr(b, '__pipe__') else b(a)`.
-    
-    >>> [1, 2, 3] >> Stream([4, 5, 6]) >> list
-    [1, 2, 3, 4, 5, 6]
+    >>> [1, 2, 3] >> map(lambda x: x+1) >> list
+    [2, 3, 4]
     """
-    def __init__(self, iterable=None):
-        """Make a Stream object from an iterable."""
-        self.iterator = iter(iterable if iterable else [])
-
-    def __iter__(self):
-        return self.iterator
-
-    def __call__(self, iterator):
-        """Append to the end of iterator."""
-        return itertools.chain(iterator, self.iterator)
-
-    def __pipe__(self, inpipe):
-        self.iterator = self.__call__(iter(inpipe))
-        return self
-
     @staticmethod
-    def pipe(inpipe, outpipe):
-        """Connect inpipe and outpipe.  If outpipe is not a Stream instance,
-        it should be an function callable on an iterable.
+    def pipe(inp, out):
+        """Connect inp and out.  If out is not a Stream instance,
+        it should be a sink (function callable on an iterable).
+
+        Inp must be either an iterable (i.e. Source) or a Stream (i.e. pure).
         """
-        if hasattr(outpipe, '__pipe__'):
-            return outpipe.__pipe__(inpipe)
-        elif hasattr(outpipe, '__call__'):
-            return outpipe(inpipe)
-        else:
-            raise BrokenPipe('No connection mechanism defined')
+
+        assert hasattr(out, "__call__"), "Cannot compose a stream with a non-callable."
+        if hasattr(inp, "__iter__"): # source stream
+            return out(iter(inp))    # connect streams
+
+        # compose generates only these closures
+        @functools.wraps(out)
+        def close(iterator):
+            return out(inp(iterator))
+
+        if isinstance(out, Stream):
+            return Stream(close)
+        return Sink(close)
 
     def __rshift__(self, outpipe):
         return Stream.pipe(self, outpipe)
@@ -193,176 +197,272 @@ class Stream(Iterable):
     def __rrshift__(self, inpipe):
         return Stream.pipe(inpipe, self)
 
-    def extend(self, outpipe):
-        """Similar to __pipe__, except that outpipe must be a Stream, in
-        which case self.iterator will be modified in-place by calling
-        outpipe.__call__ on it.
-        """
-        self.iterator = outpipe.__call__(self.iterator)
-        return self
+
+class Source(Generic[R], BaseStream):
+    """A Source is a BaseStream with a connected source.
+    It represents a lazy list.  That is stored internally as
+    the iterator attribute.
+
+    It defines __iter__(self) for consumers to use.
+    """
+    iterator : Iterator[R]
+
+    def __init__(self, iterable : Iterable[R] = []) -> None:
+        self.setup(iterable)
+
+    def setup(self, iterable : Iterable[R]) -> None:
+        self.iterator = iter(iterable)
+
+    def __iter__(self) -> Iterator[R]:
+        return self.iterator
+
+    #def __reverse__(self) -> Iterator[R]:
+    #    # Using this function is discouraged.
+    #    return reverse(self.iterator)
+
+    def extend(self, *other) -> None:
+        self.setup( itertools.chain(self.iterator, *other) )
+
+    #def __call__(self, iterator):
+    #    #"""Append to the end of iterator."""
+    #    return itertools.chain(iterator, self.iterator)
 
     def __repr__(self):
-        return 'Stream(%s)' % repr(self.iterator)
+        return "Source(%s)" % self.iterator
+
+def source(fn):
+    """ Handy source decorator that wraps fn with a Source
+    class so that it can be used in >> expressions.
+
+    e.g.
+
+    #>>> @source
+    #>>> def to_source(rng):
+    #>>>    yield from rng
+    #>>> to_source(range(4, 6)) >> tuple
+    #(4, 5)
+    """
+    @functools.wraps(fn)
+    def gen(*args, **kws):
+        return Source(fn(*args, **kws))
+    return gen
+
+
+class Stream(Generic[S,R], BaseStream, Callable[[Iterable[S]], Iterable[R]]):
+    """A stream is an iterator-processing function.
+    When connected to a data source, it is also a lazy list.
+    The lazy list is represented by a Source.
+    
+    The iterator-processing function is represented by the method
+    __call__(iterator).  Since this method is only called
+    when a source is actually defined, it always returns
+    a Source object.
+    
+    The `>>` operator is defined from BaseStream.
+    """
+    def __init__(self,
+                 fn : Callable[[Iterable[S]], Iterable[R]],
+                 *args, **kws) -> None:
+        if not hasattr(fn, "__call__"):
+            assert not hasattr(fn, "__iter__"), "Use Source() instead."
+            assert hasattr(fn, "__call__"), "Stream function must be callable."
+        self.fn = fn
+        self.args = args
+        self.kws = kws
+
+    def __call__(self, iterator : Iterator[S]) -> Source[R]:
+        """Consume the iterator to return a new Source (iterable)."""
+        return Source(self.fn(iterator, *self.args, **self.kws))
+        # Note: The function should be a generator, so this is equivalent to
+        # yield from self.fn(gen, *self.args, **self.kws)
+
+    def __repr__(self):
+        if len(self.kws) > 0:
+            return 'Stream(%s, *%s, **%s)' % (repr(self.fn),
+                                            repr(self.args),
+                                            repr(self.kws))
+        if len(self.args) > 0:
+            return 'Stream(%s, *%s)' % (repr(self.fn), repr(self.args))
+        return 'Stream(%s)' % (repr(self.fn),)
+
+
+class Sink(Generic[S, R], BaseStream):
+    def __init__(self, consumer, *args, **kws):
+        self.consumer = consumer
+        self.args = args
+        self.kws = kws
+
+    def __call__(self, iterator : Iterable[S]) -> R:
+        """Consume the iterator to yield a final value."""
+        return self.consumer(iterator, *self.args, **self.kws)
+
+    def __repr__(self):
+        if len(self.kws) > 0:
+            return 'Sink(%s, *%s, **%s)' % (repr(self.fn),
+                                            repr(self.args),
+                                            repr(self.kws))
+        if len(self.args) > 0:
+            return 'Sink(%s, *%s)' % (repr(self.fn), repr(self.args))
+        return 'Sink(%s)' % (repr(self.fn),)
+
+def stream(fn):
+    """ Handy stream decorator that wraps fn with a Stream
+    class so that it can be used in >> expressions.
+
+    Basically, the first argument to the function becomes implicit.
+
+    e.g.
+
+    #>>> @stream
+    #>>> def add_n(it : Iterator[int], n : int):
+    #>>>    for i in it:
+    #>>>        yield i+n
+    #>>> [1] >> add_n(7) >> tuple
+    #(8,)
+    """
+    @functools.wraps(fn)
+    def gen(*args, **kws):
+        return Stream(fn, *args, **kws)
+    return gen
 
 
 #_______________________________________________________________________
 # Process streams by element indices
 
+def take(n : int) -> Stream:
+    """Take the first n items of the input stream, return a Stream.
 
-class take(Stream):
-    """Take the firts n items of the input stream, return a Stream.
+    Params:
+        n: the number of elements to be taken
     
-    >>> seq(1, 2) >> take(10)
-    Stream([1, 3, 5, 7, 9, 11, 13, 15, 17, 19])
+    >>> seq(1, 2) >> take(10) >> list
+    [1, 3, 5, 7, 9, 11, 13, 15, 17, 19]
     """
-    def __init__(self, n):
-        """n: the number of elements to be taken"""
-        super(take, self).__init__()
-        self.n = n
-        self.items = []
-
-    def __call__(self, iterator):
-        self.items = list(itertools.islice(iterator, self.n))
-        return iter(self.items)
-
-    def __repr__(self):
-        return 'Stream(%s)' % repr(self.items)
+    return Stream(itertools.islice, n)
 
 
-negative = lambda x: x and x < 0    ### since None < 0 == True
+#negative = lambda x: x and x < 0    ### since None < 0 == True
 
-
-class itemtaker(Stream):
-    """Slice the input stream, return a list.
+class _ItemTaker:
+    """Slice the input stream, return a new Stream.
 
     >>> i = itertools.count()
-    >>> i >> item[:10:2]
+    >>> i >> item[:10:2] >> list
     [0, 2, 4, 6, 8]
-    >>> i >> item[:5]
+    >>> i >> item[:5] >> list
     [10, 11, 12, 13, 14]
 
-    >>> range(20) >> item[::-2]
-    [19, 17, 15, 13, 11, 9, 7, 5, 3, 1]
+    >>> range(20) >> item[::-2] >> list
+    Traceback (most recent call last):
+     ...
+    ValueError: Step for islice() must be a positive integer or None.
     """
-    def __init__(self, key=None):
-        self.key = key
-
     @staticmethod
-    def __getitem__(key):
-        if (type(key) is int) or (type(key) is slice):
-            return itemtaker(key)
-        else:
-            raise TypeError('key must be an integer or a slice')
-
-    def __pipe__(self, inpipe):
-        i = iter(inpipe)
-        if type(self.key) is int:
-            ## just one item is needed
-            if self.key >= 0:
-                # throw away self.key items
-                collections.deque(itertools.islice(i, self.key), maxlen=0)
-                return next(i)
-            else:
-                # keep the last -self.key items
-                # since we don't know beforehand when the stream stops
-                n = -self.key if self.key else 1
-                items = collections.deque(itertools.islice(i, None), maxlen=n)
-                if items:
-                    return items[-n]
-                else:
-                    return []
-        else:
-            ## a list is needed
-            if negative(self.key.stop) or negative(self.key.start) \
-                or not (self.key.start or self.key.stop) \
-                or (not self.key.start and negative(self.key.step)) \
-                or (not self.key.stop and not negative(self.key.step)):
-                # force all evaluation
-                items = [x for x in i]
-            else:
-                # force some evaluation
-                if negative(self.key.step):
-                    stop = self.key.start
-                else:
-                    stop = self.key.stop
-                items = list(itertools.islice(i, stop))
-            return items[self.key]
+    def __getitem__(key) -> Stream | Callable[[Iterable[S]],S]:
+        if isinstance(key, int):
+            if key < 0:
+                return last(key)
+            return take(key) >> next
+        assert isinstance(key, slice), 'key must be an integer or a slice'
+        return Stream(itertools.islice, key.start, key.stop, key.step)
 
     def __repr__(self):
         return '<itemtaker at %s>' % hex(id(self))
 
-item = itemtaker()
+def last(n : Optional[int] = -1) -> Stream:
+    """ Return the item n, indexed from the end.
 
+    Params:
+        n: index from end of list (0 == end of list, equivalent to n=-1)
 
-class takei(Stream):
+    Raises:
+        IndexError if the list does not contain enough elements.
+
+    >>> Source(range(5)) >> last(-1)
+    4
+    >>> Source('abcd') >> last(0) # 0 back from the end
+    'd'
+    """
+    if n >= 0: # last(0) == last(-1), last(1) == last(-2), etc.
+        n = n+1
+    else:
+        n = -n # keep the last -n items
+    # since we don't know beforehand when the stream stops
+    def ans(inp):
+        items = collections.deque(itertools.islice(inp, None), maxlen=n)
+        if len(items) == n:
+            # items[-n] == items[0]
+            return items[0]
+        else:
+            raise IndexError('list index out of range')
+    return ans
+
+item = _ItemTaker()
+
+# TODO: make this a @stream decorator pattern
+def takei(indices : Iterable[int]) -> Stream:
     """Take elements of the input stream by indices.
+
+    Params:
+        indices: an iterable of indices to be taken, should yield
+                 non-negative integers in monotonically increasing order
 
     >>> seq() >> takei(range(2, 43, 4)) >> list
     [2, 6, 10, 14, 18, 22, 26, 30, 34, 38, 42]
     """
-    def __init__(self, indices):
-        """indices: an iterable of indices to be taken, should yield
-        non-negative integers in monotonically increasing order
-        """
-        super(takei, self).__init__()
-        self.indexiter = iter(indices)
 
-    def __call__(self, iterator):
+    def gen(iterator, indices):
+        indexiter = iter(indices)
         try:
             old_idx = -1
-            idx = next(self.indexiter)                # next value to yield
-            counter = seq()
+            idx = next(indexiter)                # next value to yield
+            counter = iter(seq())
             while 1:
                 c = next(counter)
                 elem = next(iterator)
                 while idx <= old_idx:               # ignore bad values
-                    idx = next(self.indexiter)
+                    idx = next(indexiter)
                 if c == idx:
                     yield elem
                     old_idx = idx
-                    idx = next(self.indexiter)
+                    idx = next(indexiter)
         except StopIteration:
             pass
+    return Stream(gen, indices)
 
-
-class drop(Stream):
+def drop(n) -> Stream:
     """Drop the first n elements of the input stream.
 
-    >>> seq(0, 2) >> drop(1) >> take(5)
-    Stream([2, 4, 6, 8, 10])
+    Args:
+        n: the number of elements to be dropped
+
+    >>> seq(0, 2) >> drop(1) >> take(5) >> list
+    [2, 4, 6, 8, 10]
     """
-    def __init__(self, n):
-        """n: the number of elements to be dropped"""
-        super(drop, self).__init__()
-        self.n = n
-
-    def __call__(self, iterator):
-        collections.deque(itertools.islice(iterator, self.n), maxlen=0)
-        return iterator
+    return Stream(itertools.islice, n, None)
 
 
-class dropi(Stream):
+def dropi(indices):
     """Drop elements of the input stream by indices.
 
-    >>> seq() >> dropi(seq(0,3)) >> item[:10]
+    Params:
+        indices: an iterable of indices to be dropped, should yield
+                 non-negative integers in monotonically increasing order
+
+    >>> seq() >> dropi(seq(0,3)) >> item[:10] >> list
     [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
     >>> "abcd" >> dropi(range(1,3)) >> reduce(lambda a,b: a+b)
     'ad'
     """
-    def __init__(self, indices):
-        """indices: an iterable of indices to be dropped, should yield
-        non-negative integers in monotonically increasing order
-        """
-        super(dropi, self).__init__()
-        self.indexiter = iter(indices)
+    def gen(iterator, indices):
+        indexiter = iter(indices)
 
-    def __call__(self, iterator):
-        counter = seq()
+        counter = iter(seq())
         def try_next_idx():
             ## so that the stream keeps going
             ## after the discard iterator is exhausted
             try:
-                return next(self.indexiter), False
+                return next(indexiter), False
             except StopIteration:
                 return -1, True
         old_idx = -1
@@ -378,115 +478,82 @@ class dropi(Stream):
                 old_idx = idx
                 idx, exhausted = try_next_idx()
         yield from iterator
+    return Stream(gen, indices)
 
 
 #_______________________________________________________________________
 # Process streams with functions and higher-order ones
 
 
-class Processor(Stream):
-    """A decorator to turn an iterator-processing function into
-    a Stream processor object.
-    """
-    def __init__(self, function):
-        """function: an iterator-processing function, one that takes an
-        iterator and return an iterator
-        """
-        super(Processor, self).__init__()
-        self.function = function
-    
-    def __call__(self, iterator):
-        return self.function(iterator)
-
-
-class apply(Stream):
+def apply(function) -> Stream:
     """Invoke a function using each element of the input stream unpacked as
     its argument list, a la itertools.starmap.
 
-    >>> vectoradd = lambda u,v: zip(u, v) >> apply(lambda x,y: x+y) >> list
+    Params:
+        function: to be called with each stream element unpacked as its
+                  argument list
+
+    >>> vectoradd = lambda u,v: _zip(u, v) >> apply(lambda x,y: x+y) >> list
     >>> vectoradd([1, 2, 3], [4, 5, 6])
     [5, 7, 9]
     """
-    def __init__(self, function):
-        """function: to be called with each stream element unpacked as its
-        argument list
-        """
-        super(apply, self).__init__()
-        self.function = function
 
-    def __call__(self, iterator):
-        return itertools.starmap(self.function, iterator)
+    return Stream(functools.partial(itertools.starmap, function))
 
-
-class map(Stream):
+def map(function) -> Stream:
     """Invoke a function using each element of the input stream as its only
     argument, a la `map`
+
+    Params:
+        function: to be called with each stream element as its
+                  only argument
 
     >>> square = lambda x: x*x
     >>> range(10) >> map(square) >> list
     [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
     """
-    def __init__(self, function):
-        """function: to be called with each stream element as its
-        only argument
-        """
-        super(map, self).__init__()
-        self.function = function
-
-    def __call__(self, iterator):
-        return _map(self.function, iterator)
+    return Stream(functools.partial(_map, function))
 
 
-class filter(Stream):
+def filter(function) -> Stream:
     """Filter the input stream, selecting only values which evaluates to True
     by the given function, a la `filter`.
+
+    Params:
+        function: to be called with each stream element as its
+                  only argument
 
     >>> even = lambda x: x%2 == 0
     >>> range(10) >> filter(even) >> list
     [0, 2, 4, 6, 8]
     """
-    def __init__(self, function):
-        """function: to be called with each stream element as its
-        only argument
-        """
-        super(filter, self).__init__()
-        self.function = function
 
-    def __call__(self, iterator):
-        return _filter(self.function, iterator)
+    return Stream(functools.partial(_filter, function))
 
 
-class takewhile(Stream):
+def takewhile(function) -> Stream:
     """Take items from the input stream that come before the first item to
     evaluate to False by the given function, a la itertools.takewhile.
-    """
-    def __init__(self, function):
-        """function: to be called with each stream element as its
+
+    Params:
+        function: to be called with each stream element as its
         only argument
-        """
-        super(takewhile, self).__init__()
-        self.function = function
-
-    def __call__(self, iterator):
-        return itertools.takewhile(self.function, iterator)
+    """
+    return Stream(functools.partial(itertools.takewhile, function))
 
 
-class dropwhile(Stream):
+def dropwhile(function) -> Stream:
     """Drop items from the input stream that come before the first item to
     evaluate to False by the given function, a la itertools.dropwhile.
-    """
-    def __init__(self, function):
-        """function: to be called with each stream element as its
+
+    Params:
+        function: to be called with each stream element as its
         only argument
-        """
-        super(dropwhile, self).__init__()
-        self.function = function
-
-    def __call__(self, iterator):
-        return itertools.dropwhile(self.function, iterator)
+    """
+    return Stream(functools.partial(itertools.dropwhile, function))
 
 
-class fold(Stream):
+def fold(function, initval=None) -> Stream:
     """Combines the elements of the input stream by applying a function of two
     argument to a value and each element in turn.  At each step, the value is
     set to the value returned by the function, thus it is, in effect, an
@@ -496,147 +563,266 @@ class fold(Stream):
 
     This example calculate partial sums of the series 1 + 1/2 + 1/4 +...
     
-    >>> gseq(0.5) >> fold(operator.add) >> item[:5]
+    >>> gseq(0.5) >> fold(operator.add) >> item[:5] >> list
     [1, 1.5, 1.75, 1.875, 1.9375]
     """
-    def __init__(self, function, initval=None):
-        super(fold, self).__init__()
-        self.function = function
-        self.initval = initval
-
-    def __call__(self, iterator):
-        if self.initval:
-            accumulated = self.initval
-        else:
-            accumulated = next(iterator)
-        yield accumulated
+    def gen(iterator, x):
+        if x is None:
+            x = next(iterator)
+        yield x
         for val in iterator:
-            accumulated = self.function(accumulated, val)
-            yield accumulated
+            x = function(x, val)
+            yield x
+    return Stream(gen, initval)
 
 
 #_____________________________________________________________________
 # Special purpose stream processors
 
 
-class chop(Stream):
+def chop(n) -> Stream:
     """Chop the input stream into segments of length n.
+
+    Params:
+        n: the length of the segments
 
     >>> range(10) >> chop(3) >> list
     [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9]]
     """
-    def __init__(self, n):
-        """n: the length of the segments"""
-        super(chop, self).__init__()
-        self.n = n
-
-    def __call__(self, iterator):
-        while 1:
-            s = iterator >> item[:self.n]
+    def gen(iterator, n):
+        while True:
+            #s = Source(iterator) >> item[:n]
+            s = iterator >> take(n) >> list
             if s:
                 yield s
             else:
                 break
+    return Stream(gen, n)
 
-
-class itemcutter(map):
+class itemcutter:
     """Slice each element of the input stream.
 
     >>> [range(10), range(10, 20)] >> cut[::2] >> map(list) >> list
     [[0, 2, 4, 6, 8], [10, 12, 14, 16, 18]]
     """
 
-    def __init__(self, *args):
-        super(itemcutter, self).__init__( methodcaller('__getitem__', *args) )
-
-    @classmethod
-    def __getitem__(cls, args):
-        return cls(args)
+    @staticmethod
+    def __getitem__(args) -> Stream:
+        return map(methodcaller('__getitem__', args))
+        #return map(methodcaller('__getitem__', *args))
+        #return map(lambda x: x[*args])
 
     def __repr__(self):
         return '<itemcutter at %s>' % hex(id(self))
 
 cut = itemcutter()
 
+#_____________________________________________________________________
+# Useful generator functions
 
-class flattener(Stream):
+
+def seq(start=0, step=1):
+    """An arithmetic sequence generator.  Works with any type with + defined.
+
+    >>> seq(1, 0.25) >> item[:10] >> list
+    [1, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25]
+    """
+    #return Source(itertools.count(start, step))
+    def gen(a, d):
+        while True:
+            yield a
+            a += d
+    return Source(gen(start, step))
+
+
+def gseq(ratio, initval=1):
+    """A geometric sequence generator.  Works with any type with * defined.
+
+    >>> from decimal import Decimal
+    >>> gseq(Decimal('.2')) >> item[:4] >> list
+    [1, Decimal('0.2'), Decimal('0.04'), Decimal('0.008')]
+    """
+    def gen(r, x):
+        while True:
+            yield x
+            x *= r
+    return Source(gen(ratio, initval))
+
+def repeatcall(func, *args):
+    """Repeatedly call func(*args) and yield the result.
+    
+    Useful when func(*args) returns different results, esp. randomly.
+    """
+    return Source(itertools.starmap(func, itertools.repeat(args)))
+
+
+def chaincall(func, initval):
+    """Yield func(initval), func(func(initval)), etc.
+    
+    >>> chaincall(lambda x: 3*x, 2) >> take(10) >> list
+    [2, 6, 18, 54, 162, 486, 1458, 4374, 13122, 39366]
+    """
+    def gen(x):
+        while 1:
+            yield x
+            x = func(x)
+    return Source(gen(initval))
+
+#_____________________________________________________________________
+# Useful curried versions of __builtin__.{max, min, reduce}
+
+
+def maximum(key = None):
+    """
+    Curried version of the built-in max.
+    
+    >>> Source([3, 5, 28, 42, 7]) >> maximum(lambda x: x%28) 
+    42
+    """
+    return Sink(max, key=key)
+
+
+def minimum(key):
+    """
+    Curried version of the built-in min.
+    
+    >>> Source([[13, 52], [28, 35], [42, 6]]) >> minimum(lambda v: v[0] + v[1])
+    [42, 6]
+    """
+    return Sink(min, key=key)
+
+
+def reduce(function, *arg):
+    """
+    Curried version of the built-in reduce.
+    
+    >>> reduce(lambda x,y: x+y)( [1, 2, 3, 4, 5] )
+    15
+    """
+    return Sink(lambda s: _reduce(function, s, *arg))
+
+# FIXME: create conditional criteria to descent an encapsulation level
+def flattener(iterator):
     """Flatten a nested stream of arbitrary depth.
 
-    >>> (range(i) for i in seq(step=3)) >> flatten >> item[:18]
+    >>> (range(i) for i in seq(step=3)) >> flatten >> item[:18] >> list
     [0, 1, 2, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 6, 7, 8]
     """
-    @staticmethod
-    def __call__(iterator):
-        ## Maintain a LIFO stack of iterators
-        stack = []
-        i = iterator
-        while True:
+    ## Maintain a LIFO stack of iterators
+    stack = []
+    i = iterator
+    while True:
+        try:
+            e = next(i)
+            if hasattr(e, "__iter__") and not isinstance(e, str):
+                stack.append(i)
+                i = iter(e)
+            else:
+                yield e
+        except StopIteration:
             try:
-                e = next(i)
-                if hasattr(e, "__iter__") and not isinstance(e, str):
-                    stack.append(i)
-                    i = iter(e)
-                else:
-                    yield e
-            except StopIteration:
-                try:
-                    i = stack.pop()
-                except IndexError:
-                    break
+                i = stack.pop()
+            except IndexError:
+                break
 
-    def __repr__(self):
-        return '<flattener at %s>' % hex(id(self))
-
-flatten = flattener()
+flatten = Stream(flattener)
 
 
 #_______________________________________________________________________
 # Combine multiple streams
 
-
-class prepend(Stream):
+@stream
+def prepend(it, iterator):
     """Inject values at the beginning of the input stream.
 
-    >>> seq(7, 7) >> prepend(range(0, 10, 2)) >> item[:10]
+    >>> seq(7, 7) >> prepend(range(0, 10, 2)) >> item[:10] >> list
     [0, 2, 4, 6, 8, 7, 14, 21, 28, 35]
     """
-    def __call__(self, iterator):
-        return itertools.chain(self.iterator, iterator)
+    return itertools.chain(iterator, it)
 
+@stream
+def dup(iterator, new_source : Source):
+    """Duplicate the source stream onto `new_source`.
 
-class tee(Stream):
-    """Make a T-split of the input stream.
+    The duplication happens only when the this
+    stream segment is connected to a Source.
 
-    >>> foo = filter(lambda x: x%3==0)
-    >>> bar = seq(0, 2) >> tee(foo)
-    >>> bar >> item[:5]
+    Params:
+        new_source: Source whose iterator will be replaced.
+
+    >>> foo = Source()
+    >>> bar = seq(0, 2) >> dup(foo)
+    >>> bar >> item[:5] >> list
     [0, 2, 4, 6, 8]
-    >>> foo >> item[:5]
+    >>> foo >> filter(lambda x: x%3 == 0) >> item[:5] >> list
     [0, 6, 12, 18, 24]
     """
-    def __init__(self, named_stream):
-        """named_stream: a Stream object toward which the split branch
-        will be piped.
-        """
-        super(tee, self).__init__()
-        self.named_stream = named_stream
 
-    def __pipe__(self, inpipe):
-        branch1, branch2 = itertools.tee(iter(inpipe))
-        self.iterator = branch1
-        Stream.pipe(branch2, self.named_stream)
-        return self
+    branch1, branch2 = itertools.tee(iterator)
+    new_source.setup(branch2)
+    yield from branch1
+
+
+def append(ans : List):
+    """Append the contents of the iterator to `ans`.
+
+    Params:
+        ans: list to extend with the iterator values.
+
+    >>> ans = []
+    >>> "abc" >> append(ans)
+    >>> ans
+    ['a', 'b', 'c']
+    """
+    return Sink(ans.extend)
+
+
+@stream
+def tee(iterator, new_sink : Sink):
+    """Make a T-split of the input stream, sending
+    a copy through to `new_sink`.
+
+    Params:
+        new_sink: a function consuming an iterator and performing some action
+                  (since the return value is lost)
+
+    >>> ans = []
+    >>> foo = filter(lambda x: x%3==0) >> take(5) >> append(ans)
+    >>> [1,2,3] >> foo
+    >>> ans
+    [3]
+    >>> bar = seq(0, 2) >> tee(foo)
+    >>> bar >> item[:5] >> list
+    FIXME: Tee forces stream evaluation.
+    [0, 2, 4, 6, 8]
+    >>> ans
+    [3, 0, 6, 12, 18, 24]
+    """
+    # TODO: use a pipe here so that there is a chance of
+    # both consumers running simultaneously
+    #class TeeIter:
+    #    def __iter__(self):
+    #        return self
+    #    def __next__(self):
+    #        # next needs to suspend the calling thread...
+    #        return next(iterator)
+    #return TeeIter()
+    print('FIXME: Tee forces stream evaluation.')
+
+    branch1, branch2 = itertools.tee(iterator)
+    Source(branch2) >> new_sink # evaluate effect.
+    yield from branch1
 
 
 #_____________________________________________________________________
 # _iterqueue and _iterrecv
 
-
-def _iterqueue(queue):
+@source
+def iterqueue(queue):
     # Turn a either a threading.Queue or a multiprocessing.SimpleQueue
     # into an thread-safe iterator which will exhaust when StopIteration is
     # put into it.
-    while 1:
+    while True:
         item = queue.get()
         if item is StopIteration:
             # Re-broadcast, in case there is another listener blocking on
@@ -652,11 +838,12 @@ def _iterqueue(queue):
         else:
             yield item
 
-def _iterrecv(pipe):
+@source
+def iterrecv(pipe):
     # Turn a the receiving end of a multiprocessing.Connection object
     # into an iterator which will exhaust when StopIteration is
     # put into it.  _iterrecv is NOT safe to use by multiple threads.
-    while 1:
+    while True:
         try:
             item = pipe.recv()
         except EOFError:
@@ -667,614 +854,7 @@ def _iterrecv(pipe):
             else:
                 yield item
 
-
-#_____________________________________________________________________
-# Threaded/forked feeder
-
-
-class ThreadedFeeder(Iterable):
-    def __init__(self, generator, *args, **kwargs):
-        """Create a feeder that start the given generator with
-        *args and **kwargs in a separate thread.  The feeder will
-        act as an eagerly evaluating proxy of the generator.
-        
-        The feeder can then be iter()'ed over by other threads.
-        
-        This should improve performance when the generator often
-        blocks in system calls.
-        """
-        self.outqueue = queue.Queue()
-        def feeder():
-            i = generator(*args, **kwargs)
-            while 1:
-                try:
-                    self.outqueue.put(next(i))
-                except StopIteration:
-                    self.outqueue.put(StopIteration)
-                    break
-        self.thread = threading.Thread(target=feeder)
-        self.thread.start()
-    
-    def __iter__(self):
-        return _iterqueue(self.outqueue)
-
-    def join(self):
-        self.thread.join()
-
-    def __repr__(self):
-        return '<ThreadedFeeder at %s>' % hex(id(self))
-
-
-class ForkedFeeder(Iterable):
-    def __init__(self, generator, *args, **kwargs):
-        """Create a feeder that start the given generator with
-        *args and **kwargs in a child process. The feeder will
-        act as an eagerly evaluating proxy of the generator.
-        
-        The feeder can then be iter()'ed over by other processes.
-        
-        This should improve performance when the generator often
-        blocks in system calls.  Note that serialization could
-        be costly.
-        """
-        self.outpipe, inpipe = multiprocessing.Pipe(duplex=False)
-        def feed():
-            i = generator(*args, **kwargs)
-            while 1:
-                try:
-                    inpipe.send(next(i))
-                except StopIteration:
-                    inpipe.send(StopIteration)
-                    break
-        self.process = multiprocessing.Process(target=feed)
-        self.process.start()
-    
-    def __iter__(self):
-        return _iterrecv(self.outpipe)
-
-    def join(self):
-        self.process.join()
-    
-    def __repr__(self):
-        return '<ForkedFeeder at %s>' % hex(id(self))
-
-
-#_____________________________________________________________________
-# Asynchronous stream processing using a pool of threads or processes
-
-
-class ThreadPool(Stream):
-    """Work on the input stream asynchronously using a pool of threads.
-    
-    >>> range(10) >> ThreadPool(map(lambda x: x*x)) >> sum
-    285
-    
-    The pool object is an iterable over the output values.  If an
-    input value causes an Exception to be raised, the tuple (value,
-    exception) is put into the pool's `failqueue`.  The attribute
-    `failure` is a thead-safe iterator over the `failqueue`.
-    
-    See also: Executor
-    """
-    def __init__(self, function, poolsize=_nCPU, args=[], kwargs={}):
-        """function: an iterator-processing function, one that takes an
-        iterator and return an iterator
-        """
-        super(ThreadPool, self).__init__()
-        self.function = function
-        self.inqueue = queue.Queue()
-        self.outqueue = queue.Queue()
-        self.failqueue = queue.Queue()
-        self.failure = Stream(_iterqueue(self.failqueue))
-        self.closed = False
-        def work():
-            input, dupinput = itertools.tee(_iterqueue(self.inqueue))
-            output = self.function(input, *args, **kwargs)
-            while 1:
-                try:
-                    self.outqueue.put(next(output))
-                    next(dupinput)
-                except StopIteration:
-                    break
-                except Exception as e:
-                    self.failqueue.put((next(dupinput), e))
-        self.worker_threads = []
-        for _ in range(poolsize):
-            t = threading.Thread(target=work)
-            self.worker_threads.append(t)
-            t.start()
-        def cleanup():
-            # Wait for all workers to finish,
-            # then signal the end of outqueue and failqueue.
-            for t in self.worker_threads:
-                t.join()
-            self.outqueue.put(StopIteration)
-            self.failqueue.put(StopIteration)
-            self.closed = True
-        self.cleaner_thread = threading.Thread(target=cleanup)
-        self.cleaner_thread.start()
-        self.iterator = _iterqueue(self.outqueue)
-    
-    def __call__(self, inpipe):
-        if self.closed:
-            raise BrokenPipe('All workers are dead, refusing to submit jobs. '
-                             'Use another Pool.')
-        def feed():
-            for item in inpipe:
-                self.inqueue.put(item)
-            self.inqueue.put(StopIteration)
-        self.feeder_thread = threading.Thread(target=feed)
-        self.feeder_thread.start()
-        return self.iterator
-    
-    def join(self):
-        self.cleaner_thread.join()
-    
-    def __repr__(self):
-        return '<ThreadPool(poolsize=%s) at %s>' % (self.poolsize, hex(id(self)))
-
-
-class ProcessPool(Stream):
-    """Work on the input stream asynchronously using a pool of processes.
-    
-    >>> range(10) >> ProcessPool(map(lambda x: x*x)) >> sum
-    285
-    
-    The pool object is an iterable over the output values.  If an
-    input value causes an Exception to be raised, the tuple (value,
-    exception) is put into the pool's `failqueue`.  The attribute
-    `failure` is a thead-safe iterator over the `failqueue`.
-    
-    See also: Executor
-    """
-    def __init__(self, function, poolsize=_nCPU, args=[], kwargs={}):
-        """function: an iterator-processing function, one that takes an
-        iterator and return an iterator
-        """
-        super(ProcessPool, self).__init__()
-        self.function = function
-        self.poolsize = poolsize
-        self.inqueue = multiprocessing.SimpleQueue()
-        self.outqueue = multiprocessing.SimpleQueue()
-        self.failqueue = multiprocessing.SimpleQueue()
-        self.failure = Stream(_iterqueue(self.failqueue))
-        self.closed = False
-        def work():
-            input, dupinput = itertools.tee(_iterqueue(self.inqueue))
-            output = self.function(input, *args, **kwargs)
-            while 1:
-                try:
-                    self.outqueue.put(next(output))
-                    next(dupinput)
-                except StopIteration:
-                    break
-                except Exception as e:
-                    self.failqueue.put((next(dupinput), e))
-        self.worker_processes = []
-        for _ in range(self.poolsize):
-            p = multiprocessing.Process(target=work)
-            self.worker_processes.append(p)
-            p.start()
-        def cleanup():
-            # Wait for all workers to finish,
-            # then signal the end of outqueue and failqueue.
-            for p in self.worker_processes:
-                p.join()
-            self.outqueue.put(StopIteration)
-            self.failqueue.put(StopIteration)
-            self.closed = True
-        self.cleaner_thread = threading.Thread(target=cleanup)
-        self.cleaner_thread.start()
-        self.iterator = _iterqueue(self.outqueue)
-    
-    def __call__(self, inpipe):
-        if self.closed:
-            raise BrokenPipe('All workers are dead, refusing to summit jobs. '
-                             'Use another Pool.')
-        def feed():
-            for item in inpipe:
-                self.inqueue.put(item)
-            self.inqueue.put(StopIteration)
-        self.feeder_thread = threading.Thread(target=feed)
-        self.feeder_thread.start()
-        return self.iterator
-    
-    def join(self):
-        self.cleaner_thread.join()
-    
-    def __repr__(self):
-        return '<ProcessPool(poolsize=%s) at %s>' % (self.poolsize, hex(id(self)))
-
-
-class Executor(object):
-    """Provide a fine-grained level of control over a ThreadPool or ProcessPool.
-    
-    The constructor takes a pool class and arguments to its constructor::
-
-      >>> executor = Executor(ThreadPool, map(lambda x: x*x))
-    
-    Job ids are returned when items are submitted::
-
-      >>> executor.submit(*range(10))
-      range(0, 10)
-      >>> executor.submit('foo')
-      range(10, 11)
-    
-    A call to close() ends jobs submission.  Workers threads/processes
-    are now allowed to terminate after all jobs are completed::
-
-      >>> executor.close()
-    
-    The `result` and `failure` attributes are Stream instances and
-    thus iterable.  The returned iterators behave as follow: their
-    next() calls will block until a next output is available, or
-    raise StopIteration if there is no more output.  Thus we could use
-    the attributes `result` and `failure` like any other iterables::
-
-      >>> set(executor.result) == set([0, 1, 4, 9, 16, 25, 36, 49, 64, 81])
-      True
-      >>> list(executor.failure)
-      [('foo', TypeError("can't multiply sequence by non-int of type 'str'"))]
-    """
-    def __init__(self, poolclass, function, poolsize=_nCPU, args=[], kwargs={}):
-        def process_job_id(input):
-            input, dupinput = itertools.tee(input)
-            id = iter(dupinput >> cut[0])
-            input = iter(input >> cut[1])
-            output = function(input, *args, **kwargs)
-            for item in output:
-                yield next(id), item
-        self.pool = poolclass(process_job_id,
-                              poolsize=poolsize,
-                              args=args,
-                              kwargs=kwargs)
-        self.jobcount = 0
-        self._status = []
-        self.waitqueue = queue.Queue()
-        if poolclass is ProcessPool:
-            self.resultqueue = multiprocessing.SimpleQueue()
-            self.failqueue = multiprocessing.SimpleQueue()
-        else:
-            self.resultqueue = queue.Queue()
-            self.failqueue = queue.Queue()
-        self.result = Stream(_iterqueue(self.resultqueue))
-        self.failure = Stream(_iterqueue(self.failqueue))
-        self.closed = False
-        
-        self.lock = threading.Lock()
-        ## Acquired to submit and update job statuses.
-        
-        self.sema = threading.BoundedSemaphore(poolsize)
-        ## Used to throttle transfer from waitqueue to pool.inqueue,
-        ## acquired by input_feeder, released by trackers.
-        
-        def feed_input():
-            for id, item in _iterqueue(self.waitqueue):
-                self.sema.acquire()
-                with self.lock:
-                    if self._status[id] == 'SUBMITTED':
-                        self.pool.inqueue.put((id, item))
-                        self._status[id] = 'RUNNING'
-                    else:
-                        self.sema.release()
-            self.pool.inqueue.put(StopIteration)
-        self.inputfeeder_thread = threading.Thread(target=feed_input)
-        self.inputfeeder_thread.start()
-        
-        def track_result():
-            for id, item in self.pool:
-                self.sema.release()
-                with self.lock:
-                    self._status[id] = 'COMPLETED'
-                self.resultqueue.put(item)
-            self.resultqueue.put(StopIteration)
-        self.resulttracker_thread = threading.Thread(target=track_result)
-        self.resulttracker_thread.start()
-        
-        def track_failure():
-            for outval, exception in self.pool.failure:
-                self.sema.release()
-                id, item = outval
-                with self.lock:
-                    self._status[id] = 'FAILED'
-                self.failqueue.put((item, exception))
-            self.failqueue.put(StopIteration)
-        self.failuretracker_thread = threading.Thread(target=track_failure)
-        self.failuretracker_thread.start()
-    
-    def submit(self, *items):
-        """Return job ids assigned to the submitted items."""
-        with self.lock:
-            if self.closed:
-                raise BrokenPipe('Job submission has been closed.')
-            id = self.jobcount
-            self._status += ['SUBMITTED'] * len(items)
-            self.jobcount += len(items)
-            for item in items:
-                self.waitqueue.put((id, item))
-                id += 1
-        #if len(items) == 1:
-        #    return id - 1
-        #else:
-        return range(id - len(items), id)
-    
-    def cancel(self, *ids):
-        """Try to cancel jobs with associated ids.
-        
-        Return the actual number of jobs cancelled.
-        """
-        ncancelled = 0
-        with self.lock:
-            for id in ids:
-                try:
-                    if self._status[id] == 'SUBMITTED':
-                        self._status[id] = 'CANCELLED'
-                        ncancelled += 1
-                except IndexError:
-                    pass
-        return ncancelled
-
-    def status(self, *ids):
-        """Return the statuses of jobs with associated ids at the
-        time of call:  either 'SUBMITED', 'CANCELLED', 'RUNNING',
-        'COMPLETED' or 'FAILED'.
-        """
-        with self.lock:
-            if len(ids) > 1:
-                return [self._status[i] for i in ids]
-            else:
-                return self._status[ids[0]]
-    
-    def close(self):
-        """Signal that the executor will no longer accept job submission.
-        
-        Worker threads/processes are now allowed to terminate after all
-        jobs have been are completed.  Without a call to close(), they will
-        stay around forever waiting for more jobs to come.
-        """
-        with self.lock:
-            if self.closed:
-                return
-            self.waitqueue.put(StopIteration)
-            self.closed = True
-    
-    def join(self):
-        """Note that the Executor must be close()'d elsewhere,
-        or join() will never return.
-        """
-        self.inputfeeder_thread.join()
-        self.pool.join()
-        self.resulttracker_thread.join()
-        self.failuretracker_thread.join()
-    
-    def shutdown(self):
-        """Shut down the Executor.  Suspend all waiting jobs.
-        
-        Running workers will terminate after finishing their current job items.
-        The call will block until all workers are terminated.
-        """
-        with self.lock:
-            self.pool.inqueue.put(StopIteration)   # Stop the pool workers
-            self.waitqueue.put(StopIteration)      # Stop the input_feeder
-            _iterqueue(self.waitqueue) >> item[-1] # Exhaust the waitqueue
-            self.closed = True
-        self.join()
-    
-    def __repr__(self):
-        return '<Executor(%s, poolsize=%s) at %s>' % (self.pool.__class__.__name__,
-                                                      self.pool.poolsize,
-                                                      hex(id(self)))
-
-
-#_____________________________________________________________________
-# Collectors and Sorters
-
-
-class PCollector(Stream):
-    """Collect items from many ForkedFeeder's or ProcessPool's.
-    """
-    def __init__(self):
-        self.inpipes = []
-        def selrecv():
-            while self.inpipes:
-                ready, _, _ = select.select(self.inpipes, [], [])
-                for inpipe in ready:
-                    item = inpipe.recv()
-                    if item is StopIteration:
-                        del self.inpipes[self.inpipes.index(inpipe)]
-                    else:
-                        yield item
-        self.iterator = selrecv()
-    
-    def __pipe__(self, inpipe):
-        self.inpipes.append(inpipe.outpipe)
-    
-    def __repr__(self):
-        return '<PCollector at %s>' % hex(id(self))
-
-
-class _PCollector(Stream):
-    """Collect items from many ForkedFeeder's or ProcessPool's.
-
-    All input pipes are polled individually.  When none is ready, the
-    collector sleeps for a fix duration before polling again.
-    """
-    def __init__(self, waittime=0.1):
-        """waitime: the duration that the collector sleeps for
-        when all input pipes are empty
-        """
-        self.inpipes = []
-        self.waittime = waittime
-        def pollrecv():
-            while self.inpipes:
-                ready = [p for p in self.inpipes if p.poll()]
-                for inpipe in ready:
-                    item = inpipe.recv()
-                    if item is StopIteration:
-                        del self.inpipes[self.inpipes.index(inpipe)]
-                    else:
-                        yield item
-        self.iterator = pollrecv()
-    
-    def __pipe__(self, inpipe):
-        self.inpipes.append(inpipe.outpipe)
-    
-    def __repr__(self):
-        return '<QCollector at %s>' % hex(id(self))
-
-if sys.platform == "win32":
-    PCollector = _PCollector
-
-
-class QCollector(Stream):
-    """Collect items from many ThreadedFeeder's or ThreadPool's.
-    
-    All input queues are polled individually.  When none is ready, the
-    collector sleeps for a fix duration before polling again.
-    """
-    def __init__(self, waittime=0.1):
-        """waitime: the duration that the collector sleeps for
-        when all input pipes are empty
-        """
-        self.inqueues = []
-        self.waittime = waittime
-        def nonemptyget():
-            while self.inqueues:
-                ready = [q for q in self.inqueues if not q.empty()]
-                if not ready:
-                    time.sleep(self.waittime)
-                for q in ready:
-                    item = q.get()
-                    if item is StopIteration:
-                        del self.inqueues[self.inqueues.index(q)]
-                    else:
-                        yield item
-        self.iterator = nonemptyget()
-    
-    def __pipe__(self, inpipe):
-        self.inqueues.append(inpipe.outqueue)
-    
-    def __repr__(self):
-        return '<QCollector at %s>' % hex(id(self))
-
-
-class PSorter(Stream):
-    """Merge sorted input (smallest to largest) coming from many
-    ForkedFeeder's or ProcessPool's.
-    """
-    def __init__(self):
-        self.inpipes = []
-
-    def __iter__(self):
-        return heapq.merge(*_map(_iterrecv, self.inpipes))
-    
-    def __pipe__(self, inpipe):
-        self.inpipes.append(inpipe.outpipe)
-
-    def __repr__(self):
-        return '<PSorter at %s>' % hex(id(self))
-
-
-class QSorter(Stream):
-    """Merge sorted input (smallest to largest) coming from many
-    ThreadFeeder's or ThreadPool's.
-    """
-    def __init__(self):
-        self.inqueues = []
-
-    def __iter__(self):
-        return heapq.merge(*_map(_iterqueue, self.inqueues))
-    
-    def __pipe__(self, inpipe):
-        self.inqueues.append(inpipe.outqueue)
-    
-    def __repr__(self):
-        return '<PSorter at %s>' % hex(id(self))
-
-
-#_____________________________________________________________________
-# Useful generator functions
-
-
-def seq(start=0, step=1):
-    """An arithmetic sequence generator.  Works with any type with + defined.
-
-    >>> seq(1, 0.25) >> item[:10]
-    [1, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25]
-    """
-    while 1:
-        yield start
-        start += step
-
-
-def gseq(ratio, initval=1):
-    """A geometric sequence generator.  Works with any type with * defined.
-
-    >>> from decimal import Decimal
-    >>> gseq(Decimal('.2')) >> item[:4]
-    [1, Decimal('0.2'), Decimal('0.04'), Decimal('0.008')]
-    """
-    while 1:
-        yield initval
-        initval *= ratio
-
-
-def repeatcall(func, *args):
-    """Repeatedly call func(*args) and yield the result.
-    
-    Useful when func(*args) returns different results, esp. randomly.
-    """
-    return itertools.starmap(func, itertools.repeat(args))
-
-
-def chaincall(func, initval):
-    """Yield func(initval), func(func(initval)), etc.
-    
-    >>> chaincall(lambda x: 3*x, 2) >> take(10)
-    Stream([2, 6, 18, 54, 162, 486, 1458, 4374, 13122, 39366])
-    """
-    x = initval
-    while 1:
-        yield x
-        x = func(x)
-
-
-#_____________________________________________________________________
-# Useful curried versions of __builtin__.{max, min, reduce}
-
-
-def maximum(key):
-    """
-    Curried version of the built-in max.
-    
-    >>> Stream([3, 5, 28, 42, 7]) >> maximum(lambda x: x%28) 
-    42
-    """
-    return lambda s: max(s, key=key)
-
-
-def minimum(key):
-    """
-    Curried version of the built-in min.
-    
-    >>> Stream([[13, 52], [28, 35], [42, 6]]) >> minimum(lambda v: v[0] + v[1])
-    [42, 6]
-    """
-    return lambda s: min(s, key=key)
-
-
-def reduce(function, initval=None):
-    """
-    Curried version of the built-in reduce.
-    
-    >>> reduce(lambda x,y: x+y)( [1, 2, 3, 4, 5] )
-    15
-    """
-    if initval is None:
-        return lambda s: _reduce(function, s)
-    else:
-        return lambda s: _reduce(function, s, initval)
-
+# TODO: more functionality here.
 
 #_____________________________________________________________________
 # main

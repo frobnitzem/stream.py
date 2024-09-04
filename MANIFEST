@@ -1,7 +1,11 @@
 LICENSE
-README
+README.md
 setup.py
-stream.py
+stream/core.py
+stream/__init__.py
+stream/ops.py
+stream/parallel.py
+stream/py.typed
 example/feeder.py
 example/pi.py
 example/randwalk.py

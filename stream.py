@@ -181,11 +181,12 @@ class BaseStream:
         assert hasattr(out, "__call__"), "Cannot compose a stream with a non-callable."
         if hasattr(inp, "__iter__"): # source stream
             return out(iter(inp))    # connect streams
+        assert isinstance(inp, Stream), "Input to >> Stream/Sink should be a stream."
 
         # compose generates only these closures
         @functools.wraps(out)
         def close(iterator):
-            return out(inp(iterator))
+            return out(iter(inp(iterator)))
 
         if isinstance(out, Stream):
             return Stream(close)
@@ -298,12 +299,12 @@ class Sink(Generic[S, R], BaseStream):
 
     def __repr__(self):
         if len(self.kws) > 0:
-            return 'Sink(%s, *%s, **%s)' % (repr(self.fn),
+            return 'Sink(%s, *%s, **%s)' % (repr(self.consumer),
                                             repr(self.args),
                                             repr(self.kws))
         if len(self.args) > 0:
-            return 'Sink(%s, *%s)' % (repr(self.fn), repr(self.args))
-        return 'Sink(%s)' % (repr(self.fn),)
+            return 'Sink(%s, *%s)' % (repr(self.consumer), repr(self.args))
+        return 'Sink(%s)' % (repr(self.consumer),)
 
 def stream(fn):
     """ Handy stream decorator that wraps fn with a Stream
@@ -362,7 +363,7 @@ class _ItemTaker:
         if isinstance(key, int):
             if key < 0:
                 return last(key)
-            return take(key) >> next
+            return drop(key) >> next
         assert isinstance(key, slice), 'key must be an integer or a slice'
         return Stream(itertools.islice, key.start, key.stop, key.step)
 

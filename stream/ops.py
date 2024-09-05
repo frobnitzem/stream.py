@@ -45,120 +45,17 @@ def take(n : int) -> Stream:
     """
     return Stream(itertools.islice, n)
 
-class _ItemTaker:
-    """Slice the input stream, return a list.
-
-    Note: Negative start/end indices will force
-    evaluating the entire stream.
-
-    It is almost always better to use last(n)
-    to retrieve the last n items of the stream instead.
-
-    >>> i = itertools.count()
-    >>> i >> item[:10:2]
-    [0, 2, 4, 6, 8]
-    >>> i >> item[:5]
-    [10, 11, 12, 13, 14]
-    >>> range(20) >> item[::-2]
-    [19, 17, 15, 13, 11, 9, 7, 5, 3, 1]
-    >>> range(20) >> item[3:-4:4]
-    [3, 7, 11, 15]
-    """
-    @staticmethod
-    def __getitem__(key) -> Sink[S, Union[S, List[S]]]:
-        assert isinstance(key, (int, slice)), 'key must be an integer or a slice'
-        if isinstance(key, int):
-            if key < 0:
-                return last(key)
-            return drop(key) >> next
-
-        # slices are extremely messed up because of the off-by-one
-        # error.
-        def run(it : Iterator[S]) -> Union[S, List[S]]:
-            step = 1 if key.step is None else key.step
-            assert step != 0, 'Invalid step.'
-
-            s = Source(it)
-            n = 0
-            def counter(x):
-                nonlocal n
-                n += 1
-
-            if step > 0:
-                a = 0 if key.start is None else key.start
-                b = key.stop
-                # seek to a
-                if a < 0:
-                    ans = s >> tap(counter) >> last(-a)
-                    if b is None:
-                        return ans[::step]
-                    if b > 0: # adjust end-offset
-                        b = b-n+len(ans)
-                        if b < 0:
-                            return []
-                    return ans[:b:step]
-                elif a > 0:
-                    s = s >> tap(counter) >> drop(a)
-                # handle stopping at b
-                if b is None:
-                    return (s >> list)[::step]
-                if b > 0: # adjust end-offset
-                    b = b-a
-                    if b <= 0:
-                        return []
-                    return (s >> take(b) >> list)[::step]
-                # b < 0
-                ans = s >> list
-                return ans[:b:step]
-                        
-            else: # stepping backwards
-                # add one to change inclusion to leftwards.
-                if key.stop == -1: # stupid case
-                    return []
-                a = 0 if key.stop is None else key.stop+1
-                b = None if key.start is None else key.start+1
-                if a < 0:
-                    ans = s >> tap(counter) >> last(-a)
-                    if b is None:
-                        return ans[:key.stop:step]
-                    if b > 0: # adjust end-offset
-                        b = b-n+len(ans)
-                        if b <= 0:
-                            return []
-                    return ans[b-1:key.stop:step]
-                elif a > 0:
-                    s = s >> tap(counter) >> drop(a)
-                # end is now None (start of list)
-
-                # handle stopping at b
-                if b is None:
-                    return (s >> list)[::step]
-                if b > 0:  # adjust end-offset
-                    b = b-a
-                    if b <= 0:
-                        return []
-                    return (s >> take(b) >> list)[::step]
-                # b < 0
-                ans = s >> list
-                return ans[b-1::step]
-
-        return Sink(run)
-
-    def __repr__(self):
-        return '<itemtaker at %s>' % hex(id(self))
-
-item = _ItemTaker()
 
 class _StreamTaker:
     """Slice the input stream, return a Stream.
 
     >>> i = itertools.count()
-    >>> i >> takes[:10:2] >> list
+    >>> i >> item[:10:2] >> list
     [0, 2, 4, 6, 8]
-    >>> i >> takes[:5] >> list
+    >>> i >> item[:5] >> list
     [10, 11, 12, 13, 14]
 
-    >>> range(20) >> takes[::-2]
+    >>> range(20) >> item[::-2]
     Traceback (most recent call last):
      ...
     ValueError: Step for islice() must be a positive integer or None.
@@ -171,7 +68,7 @@ class _StreamTaker:
     def __repr__(self):
         return '<streamtaker at %s>' % hex(id(self))
 
-takes = _StreamTaker()
+item = _StreamTaker()
 
 
 @sink
@@ -262,7 +159,7 @@ def dropi(iterator : Iterator[S], indices : Iterable[int]) -> Iterator[S]:
         indices: an iterable of indices to be dropped, should yield
                  non-negative integers in monotonically increasing order
 
-    >>> seq() >> dropi(seq(0,3)) >> item[:10]
+    >>> seq() >> dropi(seq(0,3)) >> take(10) >> list
     [1, 2, 4, 5, 7, 8, 10, 11, 13, 14]
     >>> "abcd" >> dropi(range(1,3)) >> reduce(lambda a,b: a+b)
     'ad'
@@ -373,8 +270,8 @@ def fold(iterator : Iterator[S],
 
     This example calculate partial sums of the series 1 + 1/2 + 1/4 +...
     
-    >>> gseq(0.5) >> fold(operator.add) >> item[:5]
-    [1, 1.5, 1.75, 1.875, 1.9375]
+    >>> gseq(0.5) >> fold(operator.add) >> take(5) >> tuple
+    (1, 1.5, 1.75, 1.875, 1.9375)
     """
     if len(initval) > 0:
         x = initval[0]
@@ -401,8 +298,8 @@ def chop(iterator : Iterator[S], n : int) -> Iterable[List[S]]:
     [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9]]
     """
     while True:
-        s = Source(iterator) >> item[:n]
-        #s = iterator >> take(n) >> list
+        #s = Source(iterator) >> item[:n] >> list
+        s = iterator >> take(n) >> list
         if s:
             yield s
         else:
@@ -436,7 +333,7 @@ cut = itemcutter()
 def seq(start : T = 0, step : T = 1) -> Iterable[T]:
     """An arithmetic sequence generator.  Works with any type with + defined.
 
-    >>> seq(1, 0.25) >> item[:10]
+    >>> seq(1, 0.25) >> take(10) >> list
     [1, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.25]
     """
     #return Source(itertools.count(start, step))
@@ -450,7 +347,7 @@ def gseq(ratio : T, initval : T = 1) -> Iterable[T]:
     """A geometric sequence generator.  Works with any type with * defined.
 
     >>> from decimal import Decimal
-    >>> gseq(Decimal('.2')) >> item[:4]
+    >>> gseq(Decimal('.2')) >> item[:4] >> list
     [1, Decimal('0.2'), Decimal('0.04'), Decimal('0.008')]
     """
     x = initval
@@ -517,7 +414,7 @@ def reduce(function : Callable[[T,S],T], *arg : T) -> Sink[S,T]:
 def flatten(iterator):
     """Flatten a nested stream of arbitrary depth.
 
-    >>> (range(i) for i in seq(step=3)) >> flatten >> item[:18]
+    >>> (range(i) for i in seq(step=3)) >> flatten >> take(18) >> list
     [0, 1, 2, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 6, 7, 8]
     """
     ## Maintain a LIFO stack of iterators
@@ -545,7 +442,7 @@ def flatten(iterator):
 def prepend(iterator : Iterator[S], addl : Iterable[S]) -> Iterable[S]:
     """Inject values at the beginning of the input stream.
 
-    >>> seq(7, 7) >> prepend(range(0, 10, 2)) >> item[:10]
+    >>> seq(7, 7) >> prepend(range(0, 10, 2)) >> item[:10] >> list
     [0, 2, 4, 6, 8, 7, 14, 21, 28, 35]
     """
     return itertools.chain(addl, iterator)
@@ -562,9 +459,9 @@ def dup(iterator : Iterator[S], new_source : Source[S]) -> Iterable[S]:
 
     >>> foo = Source()
     >>> bar = seq(0, 2) >> dup(foo)
-    >>> bar >> item[:5]
+    >>> bar >> take(5) >> list
     [0, 2, 4, 6, 8]
-    >>> foo >> filter(lambda x: x%3 == 0) >> item[:5]
+    >>> foo >> filter(lambda x: x%3 == 0) >> take(5) >> list
     [0, 6, 12, 18, 24]
     """
 
@@ -602,7 +499,7 @@ def tap(iterator : Iterator[S], callback : Callable[[S], ...]) -> Iterator[S]:
     >>> ans
     [3]
     >>> bar = seq(0, 2) >> tap(foo)
-    >>> bar >> item[:5]
+    >>> bar >> take(5) >> list
     [0, 2, 4, 6, 8]
     >>> ans
     [3, 0, 6]

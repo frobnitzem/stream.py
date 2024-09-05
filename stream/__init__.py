@@ -59,7 +59,7 @@ Filters:
     + by index:  take, drop, takei, dropi
     + by condition:  filter, takewhile, dropwhile
     + by transformation:  apply, map, fold
-    + by combining streams:  prepend, tee
+    + by combining streams:  prepend, tap
     + for special purpose:  chop, cut, flatten
 
 Accumulators:  item, maximum, minimum, reduce
@@ -127,10 +127,10 @@ from .ops import (
     apply, map, filter, takewhile, dropwhile,
     fold, chop, cut,
     seq, gseq, repeatcall, chaincall,
-    maximum, minimum, reduce, flatten, prepend,
-    dup, append, tee,
-    iterqueue, iterrecv,
-    sorter
+    item, maximum, minimum,
+    reduce, flatten, prepend,
+    dup, append, tap,
+    iterqueue, iterrecv, sorter
 )
 # Note Pipe is only used by ForkedFeeder and PCollector/PSorter
 from .parallel import (

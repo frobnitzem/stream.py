@@ -11,6 +11,7 @@ class has been broken up into separate `Source`, `Stream`, and `Sink`
 classes to denote the status of a stream (whether a source
 or sink is connected).
 
+
 ### Added
 
 - `@source`, `@stream`, and `@sink` decorators make it easy to
@@ -34,21 +35,27 @@ or sink is connected).
 - divided up functionality into core, ops, and parallel
   modules `__init__.py` imports them all.
 
-- removed tee function from stream, replace with dup, tap
+- replaced tee function from stream with a stateful function caller
+  Added added dup, tap for other patterns.
 
 - removed Executor. It's largely redundant with python's
   ThreadPoolExecutor and ProcessPoolExecutor.
 
-- several parallel routines were renamed.  These are likely
-  to change still more in the future
+- several parallel routines were renamed.  Their parallelization
+  strategies may change still more in the future
 
-    * rename ThreadedFeeder -> ThreadedSource
+    * rename ThreadedFeeder -> QueueSink
 
-    * rename ForkedFeeder   -> ProcessSource
+    * rename ForkedFeeder   -> PipeSink
+
+    * rename QCollector     -> QueueSource
+
+    * rename PCollector     -> PipeSource
 
     * rename ThreadPool     -> ThreadStream
 
     * rename ProcessPool    -> ProcessStream
+
 
 ### Fixed
 

@@ -4,6 +4,7 @@ from typing import (
     TypeVar,
     Generic,
     Union,
+    Any,
     #ParamSpec,
     #Concatenate,
 )
@@ -19,6 +20,10 @@ import functools
 import operator
 import queue
 import heapq
+try:
+    from contextlib import AbstractContextManager
+except ImportError: # <3.6?
+    AbstractContextManager = Iterator # type: ignore[misc,assignment]
 
 from .core import Source, Stream, Sink, source, stream, sink
 
@@ -73,7 +78,7 @@ item = _StreamTaker()
 
 @sink
 def last(iterator : Iterator[T],
-         n : Optional[int] = -1) -> Union[int,List[T]]:
+         n : int = -1) -> Union[T,List[T]]:
     """Run through the entire stream.
 
     Return the item n, indexed from the end (if n is negative)
@@ -276,7 +281,7 @@ def fold(iterator : Iterator[S],
     if len(initval) > 0:
         x = initval[0]
     else:
-        x = next(iterator)
+        x = next(iterator) # type: ignore[assignment]
     yield x
     for val in iterator:
         x = function(x, val)
@@ -330,7 +335,7 @@ cut = itemcutter()
 
 
 @source
-def seq(start : T = 0, step : T = 1) -> Iterable[T]:
+def seq(start = 0, step = 1) -> Iterable:
     """An arithmetic sequence generator.  Works with any type with + defined.
 
     >>> seq(1, 0.25) >> take(10) >> list
@@ -343,7 +348,7 @@ def seq(start : T = 0, step : T = 1) -> Iterable[T]:
 
 
 @source
-def gseq(ratio : T, initval : T = 1) -> Iterable[T]:
+def gseq(ratio, initval = 1) -> Iterable:
     """A geometric sequence generator.  Works with any type with * defined.
 
     >>> from decimal import Decimal
@@ -380,7 +385,7 @@ def chaincall(func : Callable[[T],T], initval : T) -> Iterable[T]:
 # Useful curried versions of __builtin__.{max, min, reduce}
 
 
-def maximum(key : Optional[Callable[[T],...]] = None) -> Sink[T,T]:
+def maximum(key : Optional[Callable[[T],Any]] = None) -> Sink[T,T]:
     """
     Curried version of the built-in max.
     
@@ -390,7 +395,7 @@ def maximum(key : Optional[Callable[[T],...]] = None) -> Sink[T,T]:
     return Sink(max, key=key)
 
 
-def minimum(key : Optional[Callable[[T],...]] = None) -> Sink[T,T]:
+def minimum(key : Optional[Callable[[T],Any]] = None) -> Sink[T,T]:
     """
     Curried version of the built-in min.
     
@@ -483,9 +488,23 @@ def append(ans : List):
     """
     return Sink(ans.extend)
 
+class Tap:
+    # Tap iterator which calls `callback`
+    # whenever `Tap.__next__` is called,
+    # just before returning it.
+    def __init__(self, iterable, callback):
+        self.iterator = iter(iterable)
+        self.callback = callback
+    def __iter__(self):
+        return self
+    def __next__(self):
+        x = next(self.iterator)
+        self.callback(x)
+        return x
 
 @stream
-def tap(iterator : Iterator[S], callback : Callable[[S], ...]) -> Iterator[S]:
+def tap(iterator : Iterator[S],
+        callback : Callable[[S], Any]) -> Iterator[S]:
     """Invoke the callback for every element pulled through the stream
     by its eventual consumer(s).
 
@@ -499,57 +518,41 @@ def tap(iterator : Iterator[S], callback : Callable[[S], ...]) -> Iterator[S]:
     >>> ans
     [3]
     >>> bar = seq(0, 2) >> tap(foo)
-    >>> bar >> take(5) >> list
-    [0, 2, 4, 6, 8]
+    >>> bar >> take(7) >> list
+    [0, 2, 4, 6, 8, 10, 12]
     >>> ans
-    [3, 0, 6]
+    [3, 0, 6, 12]
     """
-    for x in iterator:
-        yield x
-        callback(x)
+    return Tap(iterator, callback)
 
 
-#_____________________________________________________________________
-# iterqueue and iterrecv
+@stream
+def tee(iterator : Iterator[S], context, *args, **kws) -> Iterator[S]:
+    """Like tap, but manages startup/shutdown of the function
+    using (internally) `with context(*args, **kws) as fn: yield x; fn(x);`
 
-@source
-def iterqueue(queue) -> Iterable:
-    # Turn a either a threading.Queue or a multiprocessing.SimpleQueue
-    # into an thread-safe iterator which will exhaust when StopIteration is
-    # put into it.
-    while True:
-        item = queue.get()
-        if item is StopIteration:
-            # Re-broadcast, in case there is another listener blocking on
-            # queue.get().  That listener will receive StopIteration and
-            # re-broadcast to the next one in line.
-            try:
-                queue.put(StopIteration)
-            except IOError:
-                # Could happen if the Queue is based on a system pipe,
-                # and the other end was closed.
-                pass
-            break
-        else:
-            yield item
+    Note: The context only exits when the stream has terminated.
+          This never happens for infinite streams, and may not
+          happen for finite ones (if the Sink quits early).
 
-@source
-def iterrecv(pipe) -> Iterable:
-    # Turn a the receiving end of a multiprocessing.Connection object
-    # into an iterator which will exhaust when StopIteration is
-    # put into it.  _iterrecv is NOT safe to use by multiple threads.
-    while True:
-        try:
-            item = pipe.recv()
-        except EOFError:
-            break
-        else:
-            if item is StopIteration:
-                break
-            else:
-                yield item
+    #>>> from contextlib import contextmanager
+    #>>> @contextmanager
+    #>>> def writer(name, mode="wa"):
+    #>>>    with open(name, mode) as f:
+    #>>>        yield f.write
+    #>>> src = ["hello", "world"] >> tee(writer, "/tmp/stream_test_write.txt")
+    #>>> src >> last(0)
+    #[]
+    #>>> with open("/tmp/stream_test_write.txt") as f: f.read()
+    #"helloworld"
+    """
+    with context(*args, **kws) as callback:
+        for x in iterator:
+            yield x
+            callback(x)
+        #print("stream complete.")
 
-def sorter(*inputs : Iterable[Source[S]]) -> Source[S]:
+def sorter(*inputs : Iterable[S]) -> Source[S]:
     """Stream / source combinator.
     Merge sorted iterates (smallest to largest) coming from many sources.
 

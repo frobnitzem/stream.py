@@ -126,15 +126,13 @@ from .ops import (
     take, last, takei, drop, dropi,
     apply, map, filter, takewhile, dropwhile,
     fold, chop, cut,
-    seq, gseq, repeatcall, chaincall,
+    seq, gseq, repeatcall, chaincall, sorter,
     item, maximum, minimum,
     reduce, flatten, prepend,
-    dup, append, tap,
-    iterqueue, iterrecv, sorter
+    append, dup, tap, tee,
 )
 # Note Pipe is only used by ForkedFeeder and PCollector/PSorter
 from .parallel import (
-    ProcessSource, ThreadedSource,
-    ProcessStream, ThreadStream,
-    PCollector, QCollector,
+    iterqueue, QueueSource, QueueSink, sink_cb,
+    ThreadStream, ProcessStream
 )

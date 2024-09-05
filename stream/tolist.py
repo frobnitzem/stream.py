@@ -28,7 +28,7 @@ class _SleepTaker:
         assert isinstance(key, (int, slice)), 'key must be an integer or a slice'
         if isinstance(key, int):
             if key < 0:
-                return last(key)
+                return last(key) # type: ignore[return-value]
             return drop(key) >> next
 
         # slices are extremely messed up because of the off-by-one

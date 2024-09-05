@@ -33,7 +33,7 @@ T = TypeVar('T')
 R = TypeVar('R')
 #SourceType = Iterable[S]
 #StreamFunc = Callable[Concatenate[Iterator[S], P], Iterable[T]]
-StreamFunc = Callable[[Iterator[S], ...], Iterable[T]]
+StreamFunc = Callable[..., Iterable[T]]
 #SinkFunc   = Callable[Concatenate[Iterator[S], P], R]
 
 #_____________________________________________________________________
@@ -62,7 +62,9 @@ class BaseStream(Generic[R]):
     """
     @staticmethod
     def pipe(inp: 'Union[BaseStream[Iterable[S]], Iterable[S]]',
-             out: 'Union[BaseStream[T], Callable[[Iterator[S]], T]]') -> T:
+             out: 'Union[BaseStream[T], Callable[[Iterator[S]], T]]'
+            ) -> T:
+            #) -> 'Union[T, Stream[S,T], Sink[S,T]]':
         """Connect inp and out.  If out is not a Stream instance,
         it should be a sink (function callable on an iterable).
 
@@ -80,8 +82,8 @@ class BaseStream(Generic[R]):
             return out(iter(inp(iterator)))
 
         if isinstance(out, Stream):
-            return Stream(close)
-        return Sink(close)
+            return Stream(close) # type: ignore[return-value]
+        return Sink(close) # type: ignore[return-value]
 
     def __rshift__(self, outpipe):
         return Stream.pipe(self, outpipe)
@@ -136,9 +138,7 @@ class Source(Generic[S], Iterable[S], BaseStream[Iterable[S]]):
     def __repr__(self) -> str:
         return "Source(%s)" % repr(self.iterator)
 
-class Stream(Generic[S,T],
-             BaseStream[Iterable[T]],
-             Callable[[Iterable[S]], Iterable[T]]):
+class Stream(Generic[S,T], BaseStream[Iterable[T]]):
     """A stream is an iterator-processing function.
     When connected to a data source, it is also a lazy list.
     The lazy list is represented by a Source.
@@ -178,9 +178,7 @@ class Stream(Generic[S,T],
         return 'Stream(%s)' % (repr(self.fn),)
 
 
-class Sink(Generic[S, R],
-           BaseStream[R],
-           Callable[[Iterable[S]], R]):
+class Sink(Generic[S, R], BaseStream[R]):
     def __init__(self, consumer, *args, **kws):
         self.consumer = consumer
         self.args = args
@@ -244,8 +242,9 @@ def source(fn : Callable[..., Iterable[S]]) -> Callable[..., Source[S]]:
         return Source(fn(*args, **kws))
     return gen
 
-def stream(fn : Callable[[Iterator[S], ...], Iterable[T]]
-          ) -> Union[Stream[S,T], Callable[..., Stream[S,T]]]:
+def stream(fn : Callable[..., Iterable[T]]
+          ) -> Callable[..., Stream[S,T]]:
+#          ) -> Union[Stream[S,T], Callable[..., Stream[S,T]]]:
     """ Handy stream decorator that wraps fn with a Stream
     class so that it can be used in >> expressions.
 
@@ -261,15 +260,16 @@ def stream(fn : Callable[[Iterator[S], ...], Iterable[T]]
     #(8,)
     """
     if _single_arg_stream(fn):
-        return Stream(fn)
+        return Stream(fn) # type: ignore[return-value]
 
     @functools.wraps(fn)
     def gen(*args, **kws):
         return Stream(fn, *args, **kws)
     return gen
 
-def sink(fn : Callable[[Iterator[S], ...], R]
-        ) -> Union[Sink[S,R], Callable[..., Sink[S,R]]]:
+def sink(fn : Callable[..., R]
+        ) -> Callable[..., Sink[S,R]]:
+#       ) -> Union[Sink[S,R], Callable[..., Sink[S,R]]]:
     """ Handy stream decorator that wraps fn with a Stream
     class so that it can be used in >> expressions.
 
@@ -285,7 +285,7 @@ def sink(fn : Callable[[Iterator[S], ...], R]
     #(8,)
     """
     if _single_arg_stream(fn):
-        return Sink(fn)
+        return Sink(fn) # type: ignore[return-value]
 
     @functools.wraps(fn)
     def gen(*args, **kws) -> Sink[S,R]:

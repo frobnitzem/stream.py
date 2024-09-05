@@ -2,7 +2,13 @@
     sending stream output to pipes / queues / sockets
     and receiving stream inputs from same.
 
-    
+    The best IPC channels to use are Queue-s --
+    queue.Queue or queue.SimpleQueue[python 3.7+]
+    for threads and multiprocessing.Queue or
+    multiprocessing.SimpleQueue for processes.
+
+    These allow setting queue maximums to prevent evaluating
+    the source stream faster than the receiver can process it.
 """
 from typing import (
     Optional,
@@ -16,25 +22,23 @@ from collections.abc import (
     Iterator,
     Callable,
 )
+from contextlib import contextmanager
 
 import itertools
 import heapq
 import queue
 
-import select
-import sys
 import threading
 import time
 
 _map = map
 
 from .core import Source, Stream, Sink, source, stream, sink
-from .ops import map, iterrecv, iterqueue
+from .ops import map
 
 #try:
 import multiprocessing
 _nCPU = multiprocessing.cpu_count()
-Pipe = multiprocessing.Pipe
 AnyQueue = Union[queue.Queue, multiprocessing.SimpleQueue]
 #except ImportError:
 #    _nCPU = 1
@@ -42,64 +46,152 @@ AnyQueue = Union[queue.Queue, multiprocessing.SimpleQueue]
 S = TypeVar('S')
 T = TypeVar('T')
 
+
+#___________
+# Sources
+
+def _try_stop(queue : AnyQueue) -> None:
+    # Re-broadcast, in case there is another listener blocking on
+    # queue.get().  That listener will receive StopIteration and
+    # re-broadcast to the next one in line.
+    try:
+        queue.put(StopIteration)
+    except IOError:
+        # Could happen if the Queue is based on a system pipe,
+        # and the other end was closed.
+        pass
+
+@source
+def iterqueue(queue : AnyQueue) -> Iterator:
+    """Turn a (queue/multiprocessing).(Queue/SimpleQueue)
+    into an thread-safe iterator which will exhaust when StopIteration is
+    put into it.
+    
+    This simple queue source works with one queue only.
+    QueueSource handles the multi-queue case, falling back
+    to this for just 1 queue.
+    """
+    while True:
+        item = queue.get()
+        if item is StopIteration:
+            _try_stop(queue)
+            break
+        yield item
+
+
+@source
+def QueueSource(*inqueues : AnyQueue, waittime : float = 0.1) -> Iterator:
+    """Collect items from many ThreadedSource's or ThreadStream's.
+    
+    All input queues are polled individually.  When none is ready, the
+    collector sleeps for a fix duration before polling again.
+
+    Params:
+        waitime: the duration that the collector sleeps for
+                 when all input pipes are empty
+
+    >>> q1 = queue.Queue(12)
+    """
+    queues = list(inqueues)
+    #if len(queues) == 1: # would return Sink, not iterator...
+    #    return iterqueue(queues[0])
+
+    def gen(queues):
+        while queues:
+            ready = [q for q in queues if not q.empty()]
+            if not ready:
+                time.sleep(waittime)
+            for q in ready:
+                item = q.get()
+                if item is StopIteration:
+                    _try_stop(q)
+                    queues.pop(queues.index(q))
+                else:
+                    yield item
+    return gen(queues)
+
 #_____________________________________________________________________
 # Threaded/forked feeder
 
-@source
-def ThreadedSource(generator : Callable[..., Iterator[S]],
-                   *args, maxsize=1024, **kwargs
-                  ) -> Iterable[S]:
-    """Create a Source that starts the given generator with
-    *args and **kwargs in a separate thread.  The thread will
-    eagerly evaluate the stream and send it to consumers.
+@sink
+def QueueSink(iterator: Iterable[S], outqueue: AnyQueue) -> None:
+    """Eagerly evaluate the stream and send it to a queue.
 
     Note: generator, args, and kwargs are all pickled
     and sent to the thread for processing, so this will only
     speedup the actual operations done during stream generation,
     not creation of the stream.
     
-    This should improve performance when the generator often
-    blocks in system calls.
+    Params:
+        outqueue: queue where output will be put()
+
+    TODO: Add arg to execute in separate thread.
+          This should improve performance when the generator often
+          blocks in system calls.
+
+    >>> from stream.ops import last
+    >>> outqueue = queue.Queue(0) # note: <3 will deadlock
+    >>> ["test"]*3 >> QueueSink(outqueue) # blocks if queue is full
+    >>> iterqueue(outqueue) >> last()
+    'test'
+    >>> 
+    >>> QueueSource(outqueue) >> last()
+    Traceback (most recent call last):
+      ...
+    IndexError: list index out of range
     """
-    outqueue = queue.Queue(maxsize)
-    def feeder():
-        for x in generator(*args, **kwargs):
-            outqueue.put(x)
-        outqueue.put(StopIteration)
-    thread = threading.Thread(target=feeder)
-    thread.start()
-    
-    yield from iterqueue(outqueue)
+    for x in iterator:
+        outqueue.put(x)
+    outqueue.put(StopIteration)
 
-    thread.join()
+def _run_receiver(q : AnyQueue, recv : Sink) -> None:
+    # TODO: return this and do something with it at callback completion?
+    QueueSource(q) >> recv
 
-# TODO: exchange data using shared memory
-# TODO: read ACK-s from the receiver to guard against sending too much data to a slow receiver
-@source
-def ProcessSource(generator : Callable[..., Iterator[S]], 
-                 *args, maxsize=0, **kwargs
-                ) -> Iterable[S]:
-    """Create a feeder that starts the given generator with
-    *args and **kwargs in a child process. The feeder will
-    act as an eagerly evaluating proxy of the generator.
-    
-    The feeder can then be streamed to other processes.
-        
-    This should improve performance when the generator often
-    blocks in system calls.  Note that serialization could
-    be costly.
+@contextmanager
+def sink_cb(recv : Sink[S, T],
+            maxsize=1024) -> Iterator[Callable[[S],None]]:
+    """ Transform the Sink to a callable within a context.
+    The sink will run in a separate thread, and pull
+    from a queue that is populated only when the stream advances.
+
+    Params:
+        recv: sink receiving data. Its return value is lost.
+        maxsize: maximum queue size before blocking on callback()
+                 to wait for the accumulated callbacks to be consumed.
+
+    >>> from stream.ops import tee, append, take
+    >>> ans = []
+    >>> tapped = "cookie" >> tee(sink_cb, append(ans), maxsize=8)
+    >>> tapped >> take(4) >> "".join
+    'cook'
+    >>> ans # not available yet
+    []
+    >>> tapped >> list
+    ['i', 'e']
+    >>> ans
+    ['c', 'o', 'o', 'k', 'i', 'e']
+    >>> tapped << "."
+    Source(<itertools.chain object at ...>)
+    >>> tapped >> "".join
+    '.'
+    >>> ''.join(ans) # FIXME should be 'cookie.', but termination is tricky
+    'cookie'
     """
-    outpipe, inpipe = Pipe(duplex=False)
-    def feed():
-        for x in generator(*args, **kwargs):
-            inpipe.send(x)
-        inpipe.send(StopIteration)
-    process = multiprocessing.Process(target=feed)
-    process.start()
-    
-    yield from iterrecv(outpipe)
-
-    process.join()
+    # Create a message queue.
+    q : queue.Queue = queue.Queue(maxsize)
+    # Run the receiving process in a separate thread.
+    # Don't wait for it to terminate when program ends.
+    t = threading.Thread(target=_run_receiver,
+                         args=(q,recv),
+                         daemon=True)
+    t.start()
+    # Setup the callback to send to the queue.
+    def callback(item : S) -> None:
+        q.put(item)
+    yield callback
+    _try_stop(q) # signal the thread to shutdown
+    t.join() # wait for queue to consume all input
 
 
 #_____________________________________________________________________
@@ -123,17 +215,19 @@ def parallel(iterator : Iterator[S],
     285
     """
 
+    inqueue : AnyQueue
+    outqueue : AnyQueue
     if typ == "thread":
-        Qtype = queue.Queue
+        inqueue  = queue.Queue()
+        outqueue = queue.Queue()
         recvfrom = iterqueue
         start = threading.Thread
     else:
-        Qtype = multiprocessing.SimpleQueue
+        inqueue  = multiprocessing.SimpleQueue()
+        outqueue = multiprocessing.SimpleQueue()
         recvfrom = iterqueue
-        start = multiprocessing.Process
+        start = multiprocessing.Process # type: ignore[assignment]
     
-    inqueue  = Qtype()
-    outqueue = Qtype()
     #failqueue = Qtype()
     #failure = Source(recvfrom(failqueue))
     def work():
@@ -177,72 +271,3 @@ def ThreadStream(worker_stream : Stream[S,T], poolsize=_nCPU*4) -> Stream[S,T]:
 def ProcessStream(worker_stream : Stream[S,T], poolsize=_nCPU) -> Stream[S,T]:
     return parallel(worker_stream, typ="process", poolsize=poolsize)
 
-
-#___________
-# Collectors
-
-@source
-def PCollector(inpipes : Iterable[Pipe]) -> Iterator:
-    """Collect items from many ProcessSource's or ProcessStream's.
-    """
-    inpipes = [p for p in inpipes]
-    while inpipes:
-        ready, _, _ = select.select(self.inpipes, [], [])
-        for inpipe in ready:
-            item = inpipe.recv()
-            if item is StopIteration:
-                inpipes.pop(inpipes.index(inpipe))
-            else:
-                yield item
-
-
-@source
-def _PCollector(inpipes : Iterable[Pipe], waittime : float = 0.1) -> Iterator:
-    """Collect items from many ProcessSource's or ProcessStream's.
-
-    All input pipes are polled individually.  When none is ready, the
-    collector sleeps for a fix duration before polling again.
-
-    Params:
-        waitime: the duration that the collector sleeps for
-                 when all input pipes are empty
-    """
-    inpipes = [p for p in inpipes]
-    while inpipes:
-        ready = [p for p in inpipes if p.poll()]
-        if not ready:
-            time.sleep(waittime)
-        for inpipe in ready:
-            item = inpipe.recv()
-            if item is StopIteration:
-                inpipes.pop(inpipes.index(inpipe))
-            else:
-                yield item
-
-
-if sys.platform == "win32":
-    PCollector = _PCollector
-
-
-@source
-def QCollector(inqueues : Iterable[AnyQueue], waittime : float = 0.1) -> Iterator:
-    """Collect items from many ThreadedSource's or ThreadStream's.
-    
-    All input queues are polled individually.  When none is ready, the
-    collector sleeps for a fix duration before polling again.
-
-    Params:
-        waitime: the duration that the collector sleeps for
-                 when all input pipes are empty
-    """
-    inqueues = [q for q in inqueues]
-    while inqueues:
-        ready = [q for q in inqueues if not q.empty()]
-        if not ready:
-            time.sleep(waittime)
-        for q in ready:
-            item = q.get()
-            if item is StopIteration:
-                inqueues.pop(inqueues.index(inqueues))
-            else:
-                yield item

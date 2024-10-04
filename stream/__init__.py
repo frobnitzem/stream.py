@@ -52,19 +52,33 @@ a number of filters.  Multiple streams can be branched and combined.
 Finally, the output is fed to an accumulator, which can be any function
 of one iterable argument.
 
+Classes: Source, Stream, Sink
+
+Decorators: @source, @stream, @sink
+
 Producers:  anything iterable
     + from this module:  seq, gseq, repeatcall, chaincall
+    + iterqueue, QueueSource
 
 Filters:
     + by index:  take, drop, takei, dropi
     + by condition:  filter, takewhile, dropwhile
     + by transformation:  apply, map, fold
-    + by combining streams:  prepend, tap
     + for special purpose:  chop, cut, flatten
 
-Accumulators:  item, maximum, minimum, reduce
+Combinators: prepend, tap, dup, tee
+
+General:
+    + sorter, sink_cb
+
+Accumulators:  last, maximum, minimum, reduce
+    + QueueSink, append
     + from Python:  list, sum, dict, max, min ...
     (anything you can call with an iterable)
+
+Parallel Operations:
+    + sink_cb, ThreadStream, ProcessStream
+
 
 Values are computed only when an accumulator forces some or all evaluation
 (not when the stream are set up).

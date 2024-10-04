@@ -388,6 +388,7 @@ def chaincall(func : Callable[[T],T], initval : T) -> Iterable[T]:
 def maximum(key : Optional[Callable[[T],Any]] = None) -> Sink[T,T]:
     """
     Curried version of the built-in max.
+    Returns item with largest key(item)
     
     >>> Source([3, 5, 28, 42, 7]) >> maximum(lambda x: x%28) 
     42
@@ -398,6 +399,7 @@ def maximum(key : Optional[Callable[[T],Any]] = None) -> Sink[T,T]:
 def minimum(key : Optional[Callable[[T],Any]] = None) -> Sink[T,T]:
     """
     Curried version of the built-in min.
+    Returns item with smallest key(item)
     
     >>> Source([[13, 52], [28, 35], [42, 6]]) >> minimum(lambda v: v[0] + v[1])
     [42, 6]

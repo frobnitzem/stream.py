@@ -8,6 +8,7 @@ and network operations.
 
 See the reference documentation in [doc](doc/index.rst).
 
+![poster](doc/poster.svg)
 
 INSTALL
 =======
@@ -33,8 +34,11 @@ RELEASES
 ========
 
 See the [changelog](CHANGELOG.md) for a description of new features
-in each release.  Basically, 0.8 is suitable for python2, and 1.0
-is for python3.
+in each release.  Basically, 0.8 is suitable for python2, and 0.9
+and beyond are for python3.
+
+The 1.0 version introduces important semantic changes to distinguish
+Source/Stream/Sink types.
 
 ROADMAP
 =======
@@ -51,5 +55,5 @@ ROADMAP
 
 1.5: exchange data between stream.parallel processes using shared memory
 
-2.0: Add typing.Concatenate and typing.ParamSpec to BaseStream.bind (>>)
+2.0: Add typing.Concatenate and typing.ParamSpec to BaseStream.pipe (>>)
      

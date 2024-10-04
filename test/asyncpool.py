@@ -1,4 +1,4 @@
-#!/usr/bin/env python2.6
+#!/usr/bin/env python3
 
 import os
 import sys
@@ -8,7 +8,7 @@ from random import randint
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from stream import filter, map, ThreadPool, ProcessPool
+from stream import filter, map, ThreadStream, ProcessStream, append
 
 
 ## The test data
@@ -29,11 +29,9 @@ def randomized(n):
         values.append(randint(-maxint, maxint))
     return values
 
-for v in [10, 100, 1000] >> map(alternating):
-    dataset.append(v)
+[10, 100, 1000] >> map(alternating) >> append(dataset)
 
-for v in [10, 100, 1000] >> map(randomized):
-    dataset.append(v)
+[10, 100, 1000] >> map(randomized) >> append(dataset)
 
 func = filter(lambda x: x&1)
 
@@ -43,23 +41,23 @@ resultset = dataset >> map(lambda s: s >> func >> set) >> list
 ## Test scenario
 
 def threadpool(i):
-    result = dataset[i] >> ThreadPool(func, poolsize=2) >> set
+    result = dataset[i] >> ThreadStream(func, poolsize=2) >> set
     pprint(result)
     assert result == resultset[i]
 
 def processpool(i):
-    result = dataset[i] >> ProcessPool(func, poolsize=2) >> set
+    result = dataset[i] >> ProcessStream(func, poolsize=2) >> set
     pprint(result)
     assert result == resultset[i]
 
 
 ## Test cases
 
-def test_ThreadPool():
+def test_ThreadStream():
     for i in range(len(dataset)):
         threadpool(i)
 
-def test_ProcessPool():
+def test_ProcessStream():
     for i in range(len(dataset)):
         processpool(i)
 

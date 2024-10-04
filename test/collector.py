@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import os, sys
 
@@ -18,11 +18,11 @@ def producer():
 	for x in range(N):
 		yield x
 
-def collect(feeder_class, collector_class, n):
-	consumer = collector_class()
+def collect(pipe, feeder_class, collector_class, n):
 	for _ in range(n):
-		feeder_class(producer) >> consumer
-	results = consumer >> list
+		producer >> feeder_class(pipe)
+
+	results = collector_class(pipe) >> list
 	pprint(results)
 	assert len(results) == N * n
 	assert set(results) == set(range(N))
@@ -32,11 +32,11 @@ def collect(feeder_class, collector_class, n):
 
 def test_PCollector():
 	for i in [1, 2, 3, 4]:
-		collect( ForkedFeeder, PCollector, i )
+		collect(Pipe(), PipeSink, PipeSource, i )
 
 def test_QCollector():
 	for i in [1, 2, 3, 4]:
-		collect( ThreadedFeeder, QCollector, i )
+		collect(Queue(), QueueSink, QueueSource, i )
 
 
 if __name__ == '__main__':

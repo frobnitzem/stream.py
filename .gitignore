@@ -3,3 +3,5 @@ build
 dist
 *.swp
 stream.egg-info
+__pycache__
+.coverage

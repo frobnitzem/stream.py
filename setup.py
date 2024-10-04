@@ -20,19 +20,24 @@ See the reference documentation in the doc/ subdirectory.
 The code repository is located at <http://github.com/aht/stream.py>.
 """
 
+requires = [
+    "importlib-metadata>=6.8.0"
+]
+
 setup(
     name='stream',
-    version='0.9.0',
+    version='1.0.0',
     description=__doc__.split('\n', 1)[0],
 	long_description = __doc__,
-    author='Anh Hai Trinh',
-    author_email='moc.liamg@hnirt.iah.hna:otliam'[::-1],
+    author=['Anh Hai Trinh', 'David M. Rogers'],
+    author_email=['moc.liamg@hnirt.iah.hna:otliam'[::-1], 'moc.liamg@hcemtatsevitciderp'[::-1]],
 	keywords='lazy iterator generator stream pipe parallellization data flow functional list processing',
 	url = 'http://github.com/aht/stream.py',
-    #packages=find_packages(),           # Automatically find packages in the directory
-    #packages=['your_package'],          # List of packages to include
-    py_modules=['stream'],              # single python module to include
+    install_requires = requires,
+    #packages=find_packages(),       # Automatically find packages in the directory
+    packages=['stream'],             # List of packages to include
+    #py_modules=['stream'],          # single python module to include
 	classifiers=filter(None, classifiers.split("\n")),
 	platforms=['any'],
-    python_requires='>=3.6',
+    python_requires='>=3.3',
 )

@@ -118,12 +118,7 @@ except ImportError:
         return lambda o: getattr(o, methodname)(*args, **kwargs)
 
 
-import pkg_resources
-
-try:
-    __version__ = pkg_resources.get_distribution('stream').version
-except Exception:
-    __version__ = 'unknown'
+__version__ = '0.9.0'
 
 
 #_____________________________________________________________________

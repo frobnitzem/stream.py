@@ -22,6 +22,7 @@ The code repository is located at <http://github.com/aht/stream.py>.
 
 setup(
     name='stream',
+    # Remember to also change stream.py:__version__ on update!
     version='0.9.0',
     description=__doc__.split('\n', 1)[0],
 	long_description = __doc__,

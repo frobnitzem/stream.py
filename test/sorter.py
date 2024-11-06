@@ -6,21 +6,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from stream import ForkedFeeder, ThreadedFeeder, PSorter, QSorter
 
+def irange(*args):
+    return iter(range(*args))
 
 def test_PSorter():
 	sorter = PSorter()
     # TODO: throw an error in the iter function to test robust PSorter behavior
 	#ForkedFeeder(lambda: iter(yrange(10))) >> sorter
-	ForkedFeeder(lambda: iter(range(10))) >> sorter
-	ForkedFeeder(lambda: iter(range(0, 20, 2))) >> sorter
+	ForkedFeeder(irange, 10) >> sorter
+	ForkedFeeder(irange, 0, 20, 2) >> sorter
 	assert sorter >> list == [0, 0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7, 8, 8, 9, 10, 12, 14, 16, 18]
 
 def test_QSorter():
 	sorter = QSorter()
     # TODO: throw an error in the iter function to test robust QSorter behavior
 	#ThreadedFeeder(lambda: iter(zrange(10))) >> sorter
-	ThreadedFeeder(lambda: iter(range(10))) >> sorter
-	ThreadedFeeder(lambda: iter(range(0, 20, 2))) >> sorter
+	ThreadedFeeder(irange, 10) >> sorter
+	ThreadedFeeder(irange, 0, 20, 2) >> sorter
 	assert sorter >> list == [0, 0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7, 8, 8, 9, 10, 12, 14, 16, 18]
 
 

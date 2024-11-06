@@ -417,9 +417,8 @@ class map(Stream):
     """Invoke a function using each element of the input stream as its only
     argument, a la `map`
 
-    >>> square = lambda x: x*x
-    >>> range(10) >> map(square) >> list
-    [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
+    >>> range(65, 75) >> map(chr) >> ','.join
+    'A,B,C,D,E,F,G,H,I,J'
     """
     def __init__(self, function):
         """function: to be called with each stream element as its
@@ -824,9 +823,8 @@ def process_queue(func, inqueue, outqueue, failqueue,
 class ProcessPool(Stream):
     """Work on the input stream asynchronously using a pool of processes.
     
-    >>> def square(x): return x*x
-    >>> range(10) >> ProcessPool(map(square)) >> sum
-    285
+    >>> seq(122,0) >> take(3) >> ProcessPool(map(chr)) >> ''.join
+    'zzz'
     
     The pool object is an iterable over the output values.  If an
     input value causes an Exception to be raised, the tuple (value,

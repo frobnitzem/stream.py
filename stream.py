@@ -808,6 +808,18 @@ class ThreadPool(Stream):
     def __repr__(self):
         return '<ThreadPool(poolsize=%s) at %s>' % (self.poolsize, hex(id(self)))
 
+def process_queue(func, inqueue, outqueue, failqueue,
+                  args, kwargs):
+    inp, dupinput = itertools.tee(_iterqueue(inqueue))
+    output = func(inp, *args, **kwargs)
+    while 1:
+        try:
+            outqueue.put(next(output))
+            next(dupinput)
+        except StopIteration:
+            break
+        except Exception as e:
+            failqueue.put((next(dupinput), e))
 
 class ProcessPool(Stream):
     """Work on the input stream asynchronously using a pool of processes.
@@ -834,20 +846,15 @@ class ProcessPool(Stream):
         self.failqueue = multiprocessing.SimpleQueue()
         self.failure = Stream(_iterqueue(self.failqueue))
         self.closed = False
-        def work():
-            input, dupinput = itertools.tee(_iterqueue(self.inqueue))
-            output = self.function(input, *args, **kwargs)
-            while 1:
-                try:
-                    self.outqueue.put(next(output))
-                    next(dupinput)
-                except StopIteration:
-                    break
-                except Exception as e:
-                    self.failqueue.put((next(dupinput), e))
         self.worker_processes = []
         for _ in range(self.poolsize):
-            p = multiprocessing.Process(target=work)
+            p = multiprocessing.Process(target=process_queue,
+                                        args=(self.function,
+                                            self.inqueue,
+                                            self.outqueue,
+                                            self.failqueue,
+                                            args,
+                                            kwargs))
             self.worker_processes.append(p)
             p.start()
         def cleanup():

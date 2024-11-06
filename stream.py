@@ -824,8 +824,9 @@ def process_queue(func, inqueue, outqueue, failqueue,
 class ProcessPool(Stream):
     """Work on the input stream asynchronously using a pool of processes.
     
-    >>> range(10) >> ProcessPool(map(lambda x: x*x)) >> sum
-    285
+    >>> from math import sqrt
+    >>> range(10) >> ProcessPool(map(sqrt)) >> sum
+    19.30600052603572
     
     The pool object is an iterable over the output values.  If an
     input value causes an Exception to be raised, the tuple (value,

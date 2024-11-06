@@ -698,6 +698,14 @@ class ThreadedFeeder(Iterable):
     def __repr__(self):
         return '<ThreadedFeeder at %s>' % hex(id(self))
 
+def _feed(generator, inpipe, args, kwargs):
+    i = generator(*args, **kwargs)
+    while 1:
+        try:
+            inpipe.send(next(i))
+        except StopIteration:
+            inpipe.send(StopIteration)
+            break
 
 class ForkedFeeder(Iterable):
     def __init__(self, generator, *args, **kwargs):
@@ -712,15 +720,11 @@ class ForkedFeeder(Iterable):
         be costly.
         """
         self.outpipe, inpipe = multiprocessing.Pipe(duplex=False)
-        def feed():
-            i = generator(*args, **kwargs)
-            while 1:
-                try:
-                    inpipe.send(next(i))
-                except StopIteration:
-                    inpipe.send(StopIteration)
-                    break
-        self.process = multiprocessing.Process(target=feed)
+        self.process = multiprocessing.Process(target=_feed,
+                                               args=(generator,
+                                                     inpipe,
+                                                     args,
+                                                     kwargs))
         self.process.start()
     
     def __iter__(self):
